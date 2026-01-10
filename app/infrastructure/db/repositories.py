@@ -1,14 +1,13 @@
 """
 Репозитории для доступа к БД через SQLAlchemy ORM (асинхронно).
-UserRepository, BanRepository, WarnRepository, BlacklistRepository, LogRepository.
 """
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import Optional, List
-from .models import User, Ban, Warn, BlacklistItem, Log
-from sqlalchemy import delete, update
+from .models import User, Ban, Warn, BlacklistItem, Log, UserStatus
+from sqlalchemy import delete, update, func
+import datetime
 
-# UserRepository
 class UserRepository:
     @staticmethod
     async def get_by_id(session: AsyncSession, user_id: int) -> Optional[User]:
@@ -23,16 +22,64 @@ class UserRepository:
         return user
 
     @staticmethod
-    async def update_username(session: AsyncSession, user_id: int, username: str):
+    async def update_status(session: AsyncSession, user_id: int, status: UserStatus):
         await session.execute(
-            update(User).where(User.id == user_id).values(username=username)
+            update(User).where(User.id == user_id).values(
+                status=status, 
+                is_banned=(status == UserStatus.BANNED)
+            )
         )
         await session.commit()
 
-# BanRepository
+    @staticmethod
+    async def update_user_info(session: AsyncSession, user_id: int, username: str = None, full_name: str = None):
+        """Обновить информацию о пользователе (username, full_name)"""
+        values = {}
+        if username is not None:
+            values['username'] = username
+        if full_name is not None:
+            values['full_name'] = full_name
+        
+        if values:
+            await session.execute(
+                update(User).where(User.id == user_id).values(**values)
+            )
+            await session.commit()
+
+    @staticmethod
+    async def increment_warn_count(session: AsyncSession, user_id: int):
+        user = await UserRepository.get_by_id(session, user_id)
+        if user:
+            user.warn_count = (user.warn_count or 0) + 1
+            await session.commit()
+            await session.refresh(user)
+
+    @staticmethod
+    async def get_all(session: AsyncSession) -> List[User]:
+        q = await session.execute(select(User))
+        return q.scalars().all()
+
+    @staticmethod
+    async def count_all(session: AsyncSession) -> int:
+        q = await session.execute(select(func.count(User.id)))
+        return q.scalar() or 0
+
+    @staticmethod
+    async def count_banned(session: AsyncSession) -> int:
+        q = await session.execute(select(func.count(User.id)).where(User.status == UserStatus.BANNED))
+        return q.scalar() or 0
+
+    @staticmethod
+    async def get_active_users(session: AsyncSession, days: int = 7) -> List[User]:
+        """Получить активных пользователей за последние N дней (есть логи)"""
+        cutoff_date = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        subquery = select(Log.user_id).where(Log.created_at >= cutoff_date).distinct()
+        q = await session.execute(select(User).where(User.id.in_(subquery)))
+        return q.scalars().all()
+
 class BanRepository:
     @staticmethod
-    async def add(session: AsyncSession, ban: Ban):
+    async def add(session: AsyncSession, ban: Ban) -> Ban:
         session.add(ban)
         await session.commit()
         await session.refresh(ban)
@@ -40,16 +87,27 @@ class BanRepository:
 
     @staticmethod
     async def get_active_by_user(session: AsyncSession, user_id: int) -> Optional[Ban]:
+        now = datetime.datetime.utcnow()
         q = await session.execute(
             select(Ban).where(Ban.user_id == user_id)
-            # тут можно добавить where Ban.until > now или иное для "актуального" бана
+            .where((Ban.until.is_(None)) | (Ban.until > now))
+            .order_by(Ban.created_at.desc())
         )
         return q.scalar_one_or_none()
 
-# WarnRepository
+    @staticmethod
+    async def unban_user(session: AsyncSession, user_id: int):
+        now = datetime.datetime.utcnow()
+        await session.execute(
+            update(Ban).where(Ban.user_id == user_id)
+            .where((Ban.until.is_(None)) | (Ban.until > now))
+            .values(until=now)
+        )
+        await session.commit()
+
 class WarnRepository:
     @staticmethod
-    async def add(session: AsyncSession, warn: Warn):
+    async def add(session: AsyncSession, warn: Warn) -> Warn:
         session.add(warn)
         await session.commit()
         await session.refresh(warn)
@@ -57,13 +115,18 @@ class WarnRepository:
 
     @staticmethod
     async def get_for_user(session: AsyncSession, user_id: int) -> List[Warn]:
-        q = await session.execute(select(Warn).where(Warn.user_id == user_id))
+        q = await session.execute(select(Warn).where(Warn.user_id == user_id).order_by(Warn.created_at.desc()))
         return q.scalars().all()
 
-# BlacklistRepository
+    @staticmethod
+    async def count_recent(session: AsyncSession, days: int = 7) -> int:
+        cutoff_date = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        q = await session.execute(select(func.count(Warn.id)).where(Warn.created_at >= cutoff_date))
+        return q.scalar() or 0
+
 class BlacklistRepository:
     @staticmethod
-    async def add(session: AsyncSession, item: BlacklistItem):
+    async def add(session: AsyncSession, item: BlacklistItem) -> BlacklistItem:
         session.add(item)
         await session.commit()
         await session.refresh(item)
@@ -71,24 +134,33 @@ class BlacklistRepository:
 
     @staticmethod
     async def get_all(session: AsyncSession) -> List[BlacklistItem]:
-        q = await session.execute(select(BlacklistItem))
+        q = await session.execute(select(BlacklistItem).order_by(BlacklistItem.created_at.desc()))
         return q.scalars().all()
 
     @staticmethod
-    async def delete_by_id(session: AsyncSession, item_id: int):
-        await session.execute(delete(BlacklistItem).where(BlacklistItem.id == item_id))
+    async def get_by_phrase(session: AsyncSession, phrase: str) -> Optional[BlacklistItem]:
+        q = await session.execute(select(BlacklistItem).where(BlacklistItem.phrase == phrase))
+        return q.scalar_one_or_none()
+
+    @staticmethod
+    async def delete_by_phrase(session: AsyncSession, phrase: str):
+        await session.execute(delete(BlacklistItem).where(BlacklistItem.phrase == phrase))
         await session.commit()
 
-# LogRepository
+    @staticmethod
+    async def count_all(session: AsyncSession) -> int:
+        q = await session.execute(select(func.count(BlacklistItem.id)))
+        return q.scalar() or 0
+
 class LogRepository:
     @staticmethod
-    async def add(session: AsyncSession, log: Log):
+    async def add(session: AsyncSession, log: Log) -> Log:
         session.add(log)
         await session.commit()
+        await session.refresh(log)
+        return log
 
     @staticmethod
-    async def get_by_type(session: AsyncSession, event_type: str, limit: int = 50) -> List[Log]:
-        q = await session.execute(
-            select(Log).where(Log.event_type == event_type).order_by(Log.created_at.desc()).limit(limit)
-        )
+    async def get_recent(session: AsyncSession, limit: int = 5) -> List[Log]:
+        q = await session.execute(select(Log).order_by(Log.created_at.desc()).limit(limit))
         return q.scalars().all()

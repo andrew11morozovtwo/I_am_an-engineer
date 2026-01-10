@@ -1,5 +1,5 @@
 """
-Запуск: python app/scripts/init_db.py
+Запуск: python -m app.scripts.init_db
 Создаёт все нужные таблицы с помощью async и SQLAlchemy.
 """
 import asyncio

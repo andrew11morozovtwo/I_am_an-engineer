@@ -20,7 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
+# Virtual environments
 venv/
 ENV/
 env/
@@ -45,12 +45,7 @@ app.db
 
 # Logs
 *.log
-logs/
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Project specific
-*.pyc
-.pytest_cache/

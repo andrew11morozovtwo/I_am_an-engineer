@@ -2,10 +2,9 @@
 App settings.
 Использует pydantic для type-safe настроек и dotenv для .env загрузки.
 """
-import os
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
-from typing import List, Union
+from pydantic import Field
+from typing import List
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,23 +14,17 @@ class Settings(BaseSettings):
     ADMIN_IDS: str = Field(default="", env="ADMIN_IDS")  # строка через запятую
     DB_URL: str = Field("sqlite+aiosqlite:///app.db", env="DB_URL")
 
-    @field_validator("ADMIN_IDS", mode="before")
-    @classmethod
-    def parse_admin_ids(cls, v: Union[str, List[int]]) -> str:
-        """Парсит ADMIN_IDS из строки через запятую или оставляет как есть"""
-        if isinstance(v, list):
-            return ",".join(map(str, v))
-        if isinstance(v, str):
-            return v
-        return ""
+    @staticmethod
+    def parse_admin_ids(admin_ids_str: str) -> List[int]:
+        """Парсит ADMIN_IDS из строки через запятую"""
+        if not admin_ids_str:
+            return []
+        ids = [int(uid.strip()) for uid in admin_ids_str.split(",") if uid.strip().isdigit()]
+        return ids
 
     def get_admin_ids_list(self) -> List[int]:
         """Возвращает список admin_id как числа"""
-        if not self.ADMIN_IDS:
-            return []
-        # Убираем пробелы и разбиваем по запятой
-        ids = [int(uid.strip()) for uid in self.ADMIN_IDS.split(",") if uid.strip().isdigit()]
-        return ids
+        return self.parse_admin_ids(self.ADMIN_IDS)
 
     class Config:
         env_file = ".env"
