@@ -11,7 +11,8 @@ load_dotenv()
 
 class Settings(BaseSettings):
     BOT_TOKEN: str = Field(..., env="BOT_TOKEN")
-    ADMIN_IDS: str = Field(default="", env="ADMIN_IDS")  # строка через запятую
+    ADMIN_IDS: str = Field(default="", env="ADMIN_IDS")  # строка через запятую (начальные админы)
+    OWNER_ID: int = Field(default=0, env="OWNER_ID")  # Главный администратор (разработчик/заказчик)
     DB_URL: str = Field("sqlite+aiosqlite:///app.db", env="DB_URL")
 
     @staticmethod

@@ -5,6 +5,7 @@ from aiogram import Router, types, Bot
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramNetworkError
 from app.application.services.user_service import register_user, get_user_by_id
+from app.application.services.admin_service import is_admin
 from app.config.settings import settings
 import asyncio
 
@@ -32,13 +33,17 @@ async def start_handler(message: types.Message):
         if not existing_user:
             # Новый пользователь
             greeting = "Привет! Ты зарегистрирован в системе 😊\n\n"
-            greeting += "Используй /help для получения справки по командам."
+            greeting += f"🆔 Твой Telegram ID: <code>{user_id}</code>\n\n"
+            greeting += "Используй /help для получения справки по командам.\n"
+            greeting += "Используй /myid чтобы узнать свой ID в любое время."
         else:
             # Существующий пользователь
             greeting = "С возвращением! 👋\n\n"
-            greeting += "Используй /help для получения справки по командам."
+            greeting += f"🆔 Твой Telegram ID: <code>{user_id}</code>\n\n"
+            greeting += "Используй /help для получения справки по командам.\n"
+            greeting += "Используй /myid чтобы узнать свой ID в любое время."
         
-        await message.answer(greeting)
+        await message.answer(greeting, parse_mode="HTML")
         
     except Exception as e:
         # Обработка ошибок
@@ -48,20 +53,48 @@ async def start_handler(message: types.Message):
         traceback.print_exc()
         await message.answer(error_message)
 
+@user_router.message(Command("myid"))
+async def myid_handler(message: types.Message):
+    """Команда /myid - показать свой Telegram user_id"""
+    try:
+        user_id = message.from_user.id
+        username = message.from_user.username
+        full_name = message.from_user.full_name
+        
+        text = "🆔 <b>Ваш Telegram ID:</b>\n\n"
+        text += f"<code>{user_id}</code>\n\n"
+        
+        if username:
+            text += f"👤 Username: @{username}\n"
+        if full_name:
+            text += f"📝 Имя: {full_name}\n"
+        
+        text += "\n💡 <i>Используйте этот ID для добавления в администраторы командой /addadmin</i>"
+        
+        await message.answer(text, parse_mode="HTML")
+        
+    except Exception as e:
+        error_message = f"❌ Произошла ошибка. Попробуйте позже."
+        print(f"Ошибка в команде /myid для пользователя {message.from_user.id}: {e}")
+        import traceback
+        traceback.print_exc()
+        await message.answer(error_message)
+
 @user_router.message(Command("help"))
 async def help_handler(message: types.Message, bot: Bot):
     """Команда /help - справка по командам бота"""
     try:
         print(f"🔍 DEBUG: Обработчик /help вызван для пользователя {message.from_user.id}")
-        # Проверяем, является ли пользователь администратором
-        is_admin_user = message.from_user.id in settings.get_admin_ids_list()
+        # Проверяем, является ли пользователь администратором (из БД)
+        is_admin_user = await is_admin(message.from_user.id)
         
         help_text = "📖 Справка по командам бота:\n\n"
         
         # Общие команды для всех пользователей
         help_text += "🔹 <b>Общие команды:</b>\n"
         help_text += "/start - Регистрация в системе\n"
-        help_text += "/help - Показать эту справку\n\n"
+        help_text += "/help - Показать эту справку\n"
+        help_text += "/myid - Показать свой Telegram ID\n\n"
         
         # Админ-команды (показываем только админам)
         if is_admin_user:
@@ -72,6 +105,17 @@ async def help_handler(message: types.Message, bot: Bot):
             help_text += "/blacklist remove {фраза} - Удалить фразу из черного списка\n"
             help_text += "/blacklist list [страница] - Показать список запрещенных фраз\n"
             help_text += "/stats - Показать статистику бота\n\n"
+            help_text += "👮 <b>Управление администраторами:</b>\n"
+            help_text += "/addadmin {user_id} {роль} - Добавить администратора\n"
+            help_text += "/removeadmin {user_id} - Удалить администратора\n"
+            help_text += "/admins - Список всех администраторов (с user_id)\n"
+            help_text += "/myadmin - Информация о себе как администраторе\n"
+            help_text += "/setrole {user_id} {роль} - Изменить роль администратора\n\n"
+            help_text += "📋 <b>Доступные роли:</b>\n"
+            help_text += "• <code>moderator</code> - Модератор (базовые права)\n"
+            help_text += "• <code>senior_admin</code> - Старший администратор\n"
+            help_text += "• <code>owner</code> - Владелец (главный администратор)\n\n"
+            help_text += "💡 <i>Чтобы узнать user_id пользователя, попросите его написать /myid в боте</i>\n\n"
         
         help_text += "ℹ️ <b>Примечание:</b>\n"
         help_text += "Бот автоматически модерирует сообщения:\n"

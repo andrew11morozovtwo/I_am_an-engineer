@@ -27,6 +27,22 @@ class User(Base):
     warns = relationship("Warn", back_populates="user", cascade="all, delete")
     bans = relationship("Ban", back_populates="user", cascade="all, delete")
 
+class Admin(Base):
+    """
+    Модель администратора с правами.
+    """
+    __tablename__ = "admins"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, unique=True, nullable=False, index=True)  # Telegram user_id
+    username = Column(String(64), nullable=True)  # @username
+    full_name = Column(String(128), nullable=True)  # Имя администратора
+    role = Column(String(32), default="moderator", nullable=False)  # moderator, senior_admin, owner
+    is_active = Column(Boolean, default=True, nullable=False)  # Можно деактивировать
+    added_by = Column(Integer, nullable=True)  # user_id кто добавил
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
+
 class Ban(Base):
     __tablename__ = "bans"
     id = Column(Integer, primary_key=True)

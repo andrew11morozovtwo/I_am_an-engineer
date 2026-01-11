@@ -7,18 +7,22 @@ from app.config.settings import settings
 from app.presentation.routers.user_router import user_router
 from app.presentation.routers.admin_router import admin_router
 from app.presentation.routers.channel_router import channel_router
-from app.infrastructure.db.session import async_init_db
-from app.application.services.user_service import unban_expired_users
+from app.infrastructure.db.session import async_init_db, get_async_session
+from app.infrastructure.db.repositories import AdminRepository
+from app.application.services.user_service import unban_expired_users, register_user
 
 async def check_expired_bans_periodically():
     """Фоновая задача для периодической проверки и снятия истекших банов"""
     while True:
         try:
-            # Проверяем и снимаем истекшие баны каждые 5 минут
-            await asyncio.sleep(300)  # 5 минут = 300 секунд
+            # Проверяем и снимаем истекшие баны каждый час
+            await asyncio.sleep(3600)  # 1 час = 3600 секунд
             unban_count = await unban_expired_users()
             if unban_count > 0:
                 print(f"✅ Автоматически снято банов: {unban_count}")
+        except asyncio.CancelledError:
+            # Задача была отменена - это нормально при остановке бота
+            break
         except Exception as e:
             print(f"⚠️ Ошибка при проверке истекших банов: {e}")
             import traceback
@@ -26,9 +30,75 @@ async def check_expired_bans_periodically():
             # Ждем перед следующей попыткой даже при ошибке
             await asyncio.sleep(60)  # 1 минута при ошибке
 
+async def initialize_admins():
+    """
+    Загрузить начальных администраторов из .env в БД (если БД пуста).
+    Это нужно для первого запуска.
+    
+    Первый администратор из ADMIN_IDS всегда получает роль "owner".
+    Остальные администраторы получают роль "moderator".
+    """
+    async with get_async_session() as session:
+        existing_admins = await AdminRepository.get_all_admins(session)
+        
+        if not existing_admins and settings.ADMIN_IDS:
+            admin_ids = settings.ADMIN_IDS.split(",")
+            print(f"[ADMIN INIT] Начальная инициализация администраторов из .env...")
+            
+            # Получаем список валидных admin_id
+            valid_admin_ids = []
+            for admin_id_str in admin_ids:
+                try:
+                    admin_id = int(admin_id_str.strip())
+                    if admin_id > 0:
+                        valid_admin_ids.append(admin_id)
+                except ValueError:
+                    print(f"[ADMIN INIT] Пропущен неверный admin_id: {admin_id_str}")
+            
+            for idx, admin_id in enumerate(valid_admin_ids):
+                try:
+                    # Определяем роль:
+                    # 1. Первый администратор из списка (idx == 0) всегда получает роль "owner"
+                    # 2. Если это OWNER_ID - всегда "owner"
+                    # 3. Иначе - "moderator"
+                    if idx == 0:  # Первый администратор всегда owner
+                        role = "owner"
+                    elif admin_id == settings.OWNER_ID and settings.OWNER_ID > 0:
+                        role = "owner"
+                    else:
+                        role = "moderator"
+                    
+                    # Регистрируем пользователя, если его нет
+                    try:
+                        await register_user(user_id=admin_id, username=None, full_name=None)
+                    except Exception as e:
+                        print(f"[ADMIN INIT] Ошибка при регистрации пользователя {admin_id}: {e}")
+                    
+                    # Добавляем администратора
+                    try:
+                        await AdminRepository.add_admin(
+                            session,
+                            user_id=admin_id,
+                            username=None,  # Будет обновлено при первом использовании
+                            full_name=None,
+                            role=role,
+                            added_by=None  # Первичная инициализация
+                        )
+                        role_display = "👑 owner" if role == "owner" else "🟢 moderator"
+                        print(f"[ADMIN INIT] ✅ Администратор {admin_id} добавлен (роль: {role_display})")
+                    except Exception as e:
+                        print(f"[ADMIN INIT] Ошибка при добавлении администратора {admin_id}: {e}")
+                except Exception as e:
+                    print(f"[ADMIN INIT] Ошибка при инициализации админа {admin_id}: {e}")
+            
+            print(f"[ADMIN INIT] Инициализация администраторов завершена.")
+
 async def main():
     # Инициализируем БД при старте
     await async_init_db()
+    
+    # Инициализируем администраторов из .env (если БД пуста)
+    await initialize_admins()
     
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher()
@@ -77,11 +147,14 @@ async def main():
     ban_check_task = None
     try:
         ban_check_task = asyncio.create_task(check_expired_bans_periodically())
-        print("✅ Запущена фоновая задача для проверки истекших банов (каждые 5 минут)")
+        print("✅ Запущена фоновая задача для проверки истекших банов (каждый час)")
         
         await dp.start_polling(bot, drop_pending_updates=True)
     except KeyboardInterrupt:
         print("\n⚠️  Получен сигнал остановки (Ctrl+C)...")
+    except asyncio.CancelledError:
+        # Нормальная ситуация при остановке
+        print("\n⚠️  Получен сигнал остановки...")
     except Exception as e:
         print(f"❌ Критическая ошибка при запуске polling: {e}")
         import traceback
@@ -91,10 +164,11 @@ async def main():
         if ban_check_task:
             try:
                 ban_check_task.cancel()
-                await ban_check_task
+                try:
+                    await ban_check_task
+                except asyncio.CancelledError:
+                    pass  # Нормально - задача отменена
                 print("✅ Фоновая задача проверки банов остановлена")
-            except asyncio.CancelledError:
-                pass
             except Exception as e:
                 print(f"⚠️ Ошибка при остановке фоновой задачи: {e}")
         
@@ -102,7 +176,7 @@ async def main():
         try:
             await bot.session.close()
             print("✅ Сессия бота закрыта")
-        except:
+        except Exception:
             pass
 
 if __name__ == "__main__":
