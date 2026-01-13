@@ -10,6 +10,9 @@ from app.presentation.routers.channel_router import channel_router
 from app.infrastructure.db.session import async_init_db, get_async_session
 from app.infrastructure.db.repositories import AdminRepository
 from app.application.services.user_service import unban_expired_users, register_user
+from app.infrastructure.ai_clients import init_ai_clients
+from app.application.services.comment_service import CommentService
+from app.application.services import set_comment_service, set_ai_clients
 
 async def check_expired_bans_periodically():
     """Фоновая задача для периодической проверки и снятия истекших банов"""
@@ -99,6 +102,18 @@ async def main():
     
     # Инициализируем администраторов из .env (если БД пуста)
     await initialize_admins()
+    
+    # Инициализируем AI клиенты и сервис комментариев
+    try:
+        ai_clients = init_ai_clients()
+        set_ai_clients(ai_clients)  # Сохраняем глобально
+        comment_service = CommentService(ai_clients.openai)
+        set_comment_service(comment_service)  # Сохраняем глобально
+        print("✅ AI клиенты и сервис комментариев инициализированы")
+    except Exception as e:
+        print(f"⚠️ Ошибка при инициализации AI клиентов: {e}")
+        print("⚠️ Бот будет работать без AI функций (комментирование постов будет отключено)")
+        comment_service = None
     
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher()
