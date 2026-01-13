@@ -16,6 +16,33 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from aiogram import Bot, types
 
+# Импорты для обработки документов (опциональные, чтобы не падать если библиотеки не установлены)
+try:
+    from docx import Document as DocxDocument
+except ImportError:
+    DocxDocument = None
+
+try:
+    from openpyxl import load_workbook
+except ImportError:
+    load_workbook = None
+
+try:
+    from pptx import Presentation
+except ImportError:
+    Presentation = None
+
+logger = logging.getLogger(__name__)
+
+# Предупреждения о недоступных библиотеках (после определения logger)
+if DocxDocument is None:
+    logger.warning("python-docx не установлен, обработка Word документов будет недоступна")
+if load_workbook is None:
+    logger.warning("openpyxl не установлен, обработка Excel файлов будет недоступна")
+if Presentation is None:
+    logger.warning("python-pptx не установлен, обработка PowerPoint файлов будет недоступна")
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,7 +118,9 @@ async def get_image_description(image_url: str, openai_client) -> Optional[str]:
     """
     try:
         logger.info(f"Запрашиваем описание изображения через Vision API: {image_url[:100]}...")
-        response = openai_client.chat.completions.create(
+        # Оборачиваем синхронный вызов OpenAI в asyncio.to_thread для неблокирующего выполнения
+        response = await asyncio.to_thread(
+            openai_client.chat.completions.create,
             model="gpt-4o-mini",
             messages=[
                 {
@@ -140,11 +169,13 @@ async def extract_pdf_text(pdf_url: str) -> Optional[str]:
     :param pdf_url: URL PDF файла
     :return: Извлеченный текст или None при ошибке
     """
+    logger.info(f"Начинаем извлечение текста из PDF по URL: {pdf_url[:100]}...")
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(pdf_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+            async with session.get(pdf_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
                 response.raise_for_status()
                 pdf_content = await response.read()
+                logger.info(f"PDF файл скачан, размер: {len(pdf_content)} байт")
                 pdf_file = io.BytesIO(pdf_content)
                 pdf_reader = PdfReader(pdf_file)
 
@@ -159,15 +190,168 @@ async def extract_pdf_text(pdf_url: str) -> Optional[str]:
                         continue
 
                 if not pdf_text.strip():
+                    logger.warning(f"Из PDF {pdf_url[:100]}... не удалось извлечь текст.")
                     return None
 
                 # Ограничиваем размер текста (примерно 4000 токенов)
                 if len(pdf_text) > 12000:
                     pdf_text = pdf_text[:12000] + "\n... (текст обрезан из-за ограничений)"
-
+                
+                logger.info(f"Текст из PDF {pdf_url[:100]}... успешно извлечен ({len(pdf_text)} символов).")
                 return pdf_text
+    except asyncio.TimeoutError:
+        logger.error(f"Таймаут при скачивании или обработке PDF по URL: {pdf_url[:100]}...")
+        return None
     except Exception as e:
-        logger.error(f"Ошибка при обработке PDF файла: {e}")
+        logger.error(f"Ошибка при обработке PDF файла {pdf_url[:100]}...: {e}", exc_info=True)
+        return None
+
+
+async def extract_document_text(document_url: str, file_extension: str) -> Optional[str]:
+    """
+    Извлекает текст из различных типов документов по URL.
+
+    Поддерживаемые форматы:
+    - .txt - текстовые файлы
+    - .docx - Word документы
+    - .xlsx - Excel файлы
+    - .pptx - PowerPoint презентации
+    - .odt - OpenDocument Text
+
+    :param document_url: URL документа
+    :param file_extension: Расширение файла (например, '.docx', '.xlsx')
+    :return: Извлеченный текст или None при ошибке
+    """
+    logger.info(f"Начинаем извлечение текста из документа {file_extension} по URL: {document_url[:100]}...")
+    try:
+        # Скачиваем файл
+        async with aiohttp.ClientSession() as session:
+            async with session.get(document_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
+                response.raise_for_status()
+                document_content = await response.read()
+                logger.info(f"Документ скачан, размер: {len(document_content)} байт")
+                document_file = io.BytesIO(document_content)
+                
+                document_text = ""
+                file_ext_lower = file_extension.lower()
+                
+                # Обработка текстовых файлов
+                if file_ext_lower == '.txt':
+                    try:
+                        document_file.seek(0)
+                        # Пробуем разные кодировки
+                        for encoding in ['utf-8', 'cp1251', 'windows-1251', 'latin-1']:
+                            try:
+                                document_file.seek(0)
+                                document_text = document_file.read().decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                        if not document_text:
+                            logger.warning("Не удалось декодировать текстовый файл")
+                            return None
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке текстового файла: {e}", exc_info=True)
+                        return None
+                
+                # Обработка Word документов (.docx)
+                elif file_ext_lower == '.docx':
+                    try:
+                        from docx import Document
+                        document_file.seek(0)
+                        doc = Document(document_file)
+                        for paragraph in doc.paragraphs:
+                            if paragraph.text.strip():
+                                document_text += paragraph.text + "\n"
+                        # Также извлекаем текст из таблиц
+                        for table in doc.tables:
+                            for row in table.rows:
+                                for cell in row.cells:
+                                    if cell.text.strip():
+                                        document_text += cell.text + " "
+                                document_text += "\n"
+                    except ImportError:
+                        logger.error("Библиотека python-docx не установлена")
+                        return None
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке Word документа: {e}", exc_info=True)
+                        return None
+                
+                # Обработка Excel файлов (.xlsx)
+                elif file_ext_lower == '.xlsx':
+                    try:
+                        from openpyxl import load_workbook
+                        document_file.seek(0)
+                        workbook = load_workbook(document_file, data_only=True)
+                        for sheet_name in workbook.sheetnames:
+                            sheet = workbook[sheet_name]
+                            document_text += f"\n--- Лист: {sheet_name} ---\n"
+                            for row in sheet.iter_rows(values_only=True):
+                                row_text = " | ".join(str(cell) if cell is not None else "" for cell in row)
+                                if row_text.strip():
+                                    document_text += row_text + "\n"
+                    except ImportError:
+                        logger.error("Библиотека openpyxl не установлена")
+                        return None
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке Excel файла: {e}", exc_info=True)
+                        return None
+                
+                # Обработка PowerPoint презентаций (.pptx)
+                elif file_ext_lower == '.pptx':
+                    try:
+                        from pptx import Presentation
+                        document_file.seek(0)
+                        prs = Presentation(document_file)
+                        for slide_num, slide in enumerate(prs.slides, 1):
+                            document_text += f"\n--- Слайд {slide_num} ---\n"
+                            for shape in slide.shapes:
+                                if hasattr(shape, "text") and shape.text.strip():
+                                    document_text += shape.text + "\n"
+                    except ImportError:
+                        logger.error("Библиотека python-pptx не установлена")
+                        return None
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке PowerPoint презентации: {e}", exc_info=True)
+                        return None
+                
+                # Обработка OpenDocument Text (.odt)
+                elif file_ext_lower == '.odt':
+                    try:
+                        from zipfile import ZipFile
+                        import xml.etree.ElementTree as ET
+                        document_file.seek(0)
+                        with ZipFile(document_file, 'r') as odt_file:
+                            content_xml = odt_file.read('content.xml')
+                            root = ET.fromstring(content_xml)
+                            # Простое извлечение текста из XML
+                            for elem in root.iter():
+                                if elem.text and elem.text.strip():
+                                    document_text += elem.text.strip() + " "
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке ODT файла: {e}", exc_info=True)
+                        return None
+                
+                else:
+                    logger.warning(f"Неподдерживаемый формат документа: {file_extension}")
+                    return None
+                
+                if not document_text.strip():
+                    logger.warning(f"Из документа {file_extension} не удалось извлечь текст.")
+                    return None
+                
+                # Ограничиваем размер текста (примерно 4000 токенов)
+                if len(document_text) > 12000:
+                    document_text = document_text[:12000] + "\n... (текст обрезан из-за ограничений)"
+                
+                logger.info(f"Текст из документа {file_extension} успешно извлечен ({len(document_text)} символов).")
+                return document_text
+                
+    except asyncio.TimeoutError:
+        logger.error(f"Таймаут при скачивании или обработке документа {file_extension} по URL: {document_url[:100]}...")
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка при обработке документа {file_extension} {document_url[:100]}...: {e}", exc_info=True)
         return None
 
 
@@ -180,7 +364,10 @@ async def analyze_pdf(pdf_text: str, openai_client) -> Optional[str]:
     :return: Анализ документа или None при ошибке
     """
     try:
-        response = openai_client.chat.completions.create(
+        logger.info(f"Начинаем анализ PDF текста ({len(pdf_text)} символов)...")
+        # Оборачиваем синхронный вызов OpenAI в asyncio.to_thread для неблокирующего выполнения
+        response = await asyncio.to_thread(
+            openai_client.chat.completions.create,
             model="gpt-4o-mini",
             messages=[
                 {
@@ -199,9 +386,11 @@ async def analyze_pdf(pdf_text: str, openai_client) -> Optional[str]:
             ],
             max_tokens=500,
         )
-        return response.choices[0].message.content
+        analysis = response.choices[0].message.content
+        logger.info(f"Анализ PDF получен: {analysis[:100]}...")
+        return analysis
     except Exception as e:
-        logger.error(f"Ошибка при обращении к OpenAI для анализа PDF: {e}")
+        logger.error(f"Ошибка при обращении к OpenAI для анализа PDF: {e}", exc_info=True)
         return None
 
 
@@ -287,7 +476,8 @@ async def prepare_message_content(
     """
     Подготавливает полный контент сообщения для обработки AI.
 
-    Обрабатывает различные типы контента: текст, фото, PDF, аудио, голосовые сообщения.
+    Обрабатывает различные типы контента: текст, фото, PDF, документы (txt, docx, xlsx, pptx, odt), 
+    аудио, голосовые сообщения.
 
     :param bot: Экземпляр бота
     :param message: Сообщение для обработки
@@ -317,47 +507,77 @@ async def prepare_message_content(
     else:
         logger.info("Базовый текст отсутствует")
 
-    # ОТКЛЮЧЕНО ДЛЯ ОТЛАДКИ: Обработка фотографий
-    # if message.photo:
-    #     logger.info("Обнаружено фото в сообщении, начинаем обработку")
-    #     try:
-    #         image_url = await asyncio.wait_for(get_photo_url(bot, message), timeout=10.0)
-    #         if image_url:
-    #             logger.info(f"URL изображения получен: {image_url[:100]}...")
-    #             description = await asyncio.wait_for(
-    #                 get_image_description(image_url, openai_client), 
-    #                 timeout=30.0
-    #             )
-    #             if description:
-    #                 logger.info(f"Описание изображения получено: {description[:100]}...")
-    #                 content_parts.append(f"\nОписание изображения: {description}")
-    #             else:
-    #                 logger.warning("Не удалось получить описание изображения")
-    #         else:
-    #             logger.warning("Не удалось получить URL изображения")
-    #     except asyncio.TimeoutError:
-    #         logger.warning("Таймаут при обработке фото, пропускаем описание")
-    #     except Exception as e:
-    #         logger.error(f"Ошибка при обработке фото: {e}", exc_info=True)
+    # Обработка фотографий (неблокирующая, с таймаутом)
     if message.photo:
-        logger.info("ОТЛАДКА: Обработка фото отключена, используем только подпись")
+        logger.info("Обнаружено фото в сообщении, начинаем обработку")
+        try:
+            image_url = await asyncio.wait_for(get_photo_url(bot, message), timeout=10.0)
+            if image_url:
+                logger.info(f"URL изображения получен: {image_url[:100]}...")
+                description = await asyncio.wait_for(
+                    get_image_description(image_url, openai_client), 
+                    timeout=30.0
+                )
+                if description:
+                    logger.info(f"Описание изображения получено: {description[:100]}...")
+                    content_parts.append(f"\nОписание изображения: {description}")
+                else:
+                    logger.warning("Не удалось получить описание изображения")
+            else:
+                logger.warning("Не удалось получить URL изображения")
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при обработке фото, пропускаем описание")
+        except Exception as e:
+            logger.error(f"Ошибка при обработке фото: {e}", exc_info=True)
 
-    # ОТКЛЮЧЕНО ДЛЯ ОТЛАДКИ: Обработка PDF документов
-    # if message.document and message.document.file_name and message.document.file_name.lower().endswith('.pdf'):
-    #     try:
-    #         file_info = await asyncio.wait_for(bot.get_file(message.document.file_id), timeout=10.0)
-    #         pdf_url = f'https://api.telegram.org/file/bot{bot.token}/{file_info.file_path}'
-    #         pdf_text = await asyncio.wait_for(extract_pdf_text(pdf_url), timeout=60.0)
-    #         if pdf_text:
-    #             analysis = await asyncio.wait_for(analyze_pdf(pdf_text, openai_client), timeout=30.0)
-    #             if analysis:
-    #                 content_parts.append(f"\n\nАнализ PDF документа:\n{analysis}")
-    #     except asyncio.TimeoutError:
-    #         logger.warning("Таймаут при обработке PDF, пропускаем анализ")
-    #     except Exception as e:
-    #         logger.error(f"Ошибка при обработке PDF: {e}", exc_info=True)
-    if message.document:
-        logger.info("ОТЛАДКА: Обработка PDF отключена, используем только подпись")
+    # Обработка PDF документов (неблокирующая, с таймаутом)
+    # Извлекаем только текст из PDF, без анализа через OpenAI
+    if message.document and message.document.file_name and message.document.file_name.lower().endswith('.pdf'):
+        logger.info("Обнаружен PDF документ в сообщении, начинаем извлечение текста")
+        try:
+            file_info = await asyncio.wait_for(bot.get_file(message.document.file_id), timeout=10.0)
+            pdf_url = f'https://api.telegram.org/file/bot{bot.token}/{file_info.file_path}'
+            pdf_text = await asyncio.wait_for(extract_pdf_text(pdf_url), timeout=60.0)
+            if pdf_text:
+                logger.info(f"Текст из PDF извлечен: {len(pdf_text)} символов")
+                content_parts.append(f"\n\nТекст из PDF документа:\n{pdf_text}")
+            else:
+                logger.warning("Не удалось извлечь текст из PDF документа")
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при обработке PDF, пропускаем извлечение текста")
+        except Exception as e:
+            logger.error(f"Ошибка при обработке PDF: {e}", exc_info=True)
+
+    # Обработка других документов (txt, docx, xlsx, pptx, odt) - неблокирующая, с таймаутом
+    # Извлекаем только текст из документов, без анализа через OpenAI
+    if message.document and message.document.file_name:
+        file_name_lower = message.document.file_name.lower()
+        # Поддерживаемые форматы документов
+        supported_extensions = ['.txt', '.docx', '.xlsx', '.pptx', '.odt']
+        file_extension = None
+        for ext in supported_extensions:
+            if file_name_lower.endswith(ext):
+                file_extension = ext
+                break
+        
+        if file_extension:
+            logger.info(f"Обнаружен документ {file_extension} в сообщении, начинаем извлечение текста")
+            try:
+                file_info = await asyncio.wait_for(bot.get_file(message.document.file_id), timeout=10.0)
+                document_url = f'https://api.telegram.org/file/bot{bot.token}/{file_info.file_path}'
+                document_text = await asyncio.wait_for(
+                    extract_document_text(document_url, file_extension), 
+                    timeout=60.0
+                )
+                if document_text:
+                    logger.info(f"Текст из документа {file_extension} извлечен: {len(document_text)} символов")
+                    content_parts.append(f"\n\nТекст из документа {file_extension}:\n{document_text}")
+                else:
+                    logger.warning(f"Не удалось извлечь текст из документа {file_extension}")
+            except asyncio.TimeoutError:
+                logger.warning(f"Таймаут при обработке документа {file_extension}, пропускаем извлечение текста")
+            except Exception as e:
+                logger.error(f"Ошибка при обработке документа {file_extension}: {e}", exc_info=True)
 
     # ОТКЛЮЧЕНО ДЛЯ ОТЛАДКИ: Обработка голосовых сообщений
     # if message.voice:

@@ -6,7 +6,7 @@
 from aiogram import Router, types, Bot
 from aiogram.filters import Command
 from app.application.services.moderation_service import check_message_for_blacklist
-from app.application.services.user_service import get_user_ban, get_user_by_id, get_user_warns_count, ban_user, register_user
+from app.application.services.user_service import get_user_ban, get_user_by_id, get_user_warns_count, ban_user, register_user, add_warn
 from app.application.services.content_service import prepare_message_content
 from app.application.services.comment_service import CommentService
 from app.application.services import get_comment_service, get_ai_clients
@@ -209,7 +209,6 @@ async def discussion_message_handler(message: types.Message, bot: Bot):
             
             # Выдаем варн за нарушение blacklist
             try:
-                from app.application.services.user_service import add_warn
                 await add_warn(
                     message.from_user.id,
                     reason="Использование запрещенных слов/выражений (blacklist)",
@@ -316,17 +315,325 @@ async def discussion_message_handler(message: types.Message, bot: Bot):
         comment_service = get_comment_service()
         if comment_service:
             try:
-                # Получаем текст комментария пользователя
-                user_comment = message.text or message.caption or ""
-                if not user_comment:
-                    return  # Пропускаем сообщения без текста
+                # Получаем полный контент комментария пользователя (текст/подпись + описание фото от ИИ)
+                ai_clients = get_ai_clients()
+                if not ai_clients or not ai_clients.openai:
+                    logger.warning("AI клиенты недоступны, используем только текст/подпись")
+                    user_comment = message.text or message.caption or ""
+                    if not user_comment:
+                        return  # Пропускаем сообщения без текста
+                else:
+                    # Обрабатываем комментарий через prepare_message_content для получения описания фото
+                    try:
+                        user_comment_full = await prepare_message_content(
+                            bot, message, ai_clients.openai
+                        )
+                        logger.info(f"Полный контент комментария пользователя: {user_comment_full[:200]}...")
+                        
+                        # Проверяем blacklist для описания фотографии от ИИ
+                        # Извлекаем описание фото из полного контента (если есть)
+                        image_description = None
+                        if "Описание изображения:" in user_comment_full:
+                            # Извлекаем описание изображения
+                            parts = user_comment_full.split("Описание изображения:")
+                            if len(parts) > 1:
+                                image_description = parts[1].strip()
+                                logger.info(f"Извлечено описание изображения: {image_description[:100]}...")
+                                
+                                # Проверяем blacklist для описания фотографии
+                                if await check_message_for_blacklist(image_description):
+                                    logger.warning(f"⚠️ Описание фотографии содержит запрещенную лексику, удаляем комментарий")
+                                    # Удаляем комментарий и выдаем варн (логика аналогична проверке blacklist выше)
+                                    username_display = f"@{message.from_user.username}" if message.from_user.username else f"ID {message.from_user.id}"
+                                    warn_count = 0
+                                    
+                                    if message.from_user.username:
+                                        username = f"@{message.from_user.username}"
+                                    elif message.from_user.full_name:
+                                        username = message.from_user.full_name
+                                    else:
+                                        username = f"ID {message.from_user.id}"
+                                    
+                                    try:
+                                        # Регистрируем пользователя, если его нет
+                                        try:
+                                            await register_user(
+                                                user_id=message.from_user.id,
+                                                username=message.from_user.username,
+                                                full_name=message.from_user.full_name
+                                            )
+                                        except Exception as reg_error:
+                                            logger.warning(f"⚠️ Ошибка при регистрации пользователя {message.from_user.id}: {reg_error}")
+                                        
+                                        # Выдаем варн за нарушение blacklist в описании фото
+                                        await add_warn(
+                                            user_id=message.from_user.id,
+                                            reason="Использование запрещенных слов/выражений в описании фотографии (blacklist)",
+                                            admin_id=None
+                                        )
+                                        warn_count = await get_user_warns_count(message.from_user.id)
+                                    except Exception as e:
+                                        logger.error(f"⚠️ Ошибка при обработке пользователя: {e}", exc_info=True)
+                                        if warn_count == 0:
+                                            warn_count = 1
+                                    
+                                    # Отправляем уведомление
+                                    warning_msg = (
+                                        f"{username}, ⚠️ Ваше сообщение удалено из-за использования запрещенных слов/выражений в описании фотографии.\n"
+                                        f"Предупреждений: {warn_count}/3\n"
+                                        f"После трех предупреждений Вам запретят на 24 часа комментировать посты."
+                                    )
+                                    
+                                    try:
+                                        await message.reply(warning_msg)
+                                        logger.info(f"✅ Уведомление отправлено пользователю {username_display}")
+                                    except Exception as reply_error:
+                                        try:
+                                            await bot.send_message(
+                                                chat_id=message.chat.id,
+                                                text=warning_msg
+                                            )
+                                        except Exception:
+                                            pass
+                                    
+                                    # Удаляем сообщение
+                                    try:
+                                        await message.delete()
+                                        logger.info(f"✅ Комментарий {message.message_id} с запрещенной лексикой в описании фото удален")
+                                    except Exception as delete_error:
+                                        logger.error(f"⚠️ Ошибка при удалении сообщения: {delete_error}")
+                                    
+                                    # Если 3+ варнов → автоматический бан
+                                    if warn_count >= 3:
+                                        try:
+                                            await ban_user(
+                                                user_id=message.from_user.id,
+                                                reason="Автоматический бан за 3+ варнов (нарушение blacklist в описании фото)",
+                                                days=1,
+                                                admin_id=None
+                                            )
+                                            await bot.send_message(
+                                                chat_id=message.chat.id,
+                                                text=f"❌ Пользователь {username_display} автоматически забанен на 24 часа за превышение лимита предупреждений (3+ варнов)."
+                                            )
+                                        except Exception as ban_error:
+                                            logger.error(f"⚠️ Ошибка при автоматическом бане: {ban_error}")
+                                    
+                                    return  # Прерываем обработку комментария
+                        
+                        # Проверяем blacklist для PDF документа (подпись + текст из PDF)
+                        # Извлекаем текст из PDF из полного контента (если есть)
+                        pdf_text_content = None
+                        if "Текст из PDF документа:" in user_comment_full:
+                            # Извлекаем текст из PDF
+                            parts = user_comment_full.split("Текст из PDF документа:")
+                            if len(parts) > 1:
+                                pdf_text_content = parts[1].strip()
+                                logger.info(f"Извлечен текст из PDF документа: {len(pdf_text_content)} символов")
+                                
+                                # Собираем подпись + текст из PDF для проверки blacklist
+                                caption = message.caption or ""
+                                pdf_content_for_check = f"{caption} {pdf_text_content}".strip()
+                                logger.info(f"Проверяем blacklist для подписи + текста из PDF: {pdf_content_for_check[:200]}...")
+                                
+                                # Проверяем blacklist для подписи + текста из PDF
+                                if await check_message_for_blacklist(pdf_content_for_check):
+                                    logger.warning(f"⚠️ PDF документ или подпись содержат запрещенную лексику, удаляем комментарий")
+                                    # Удаляем комментарий и выдаем варн (логика аналогична проверке blacklist выше)
+                                    username_display = f"@{message.from_user.username}" if message.from_user.username else f"ID {message.from_user.id}"
+                                    warn_count = 0
+                                    
+                                    if message.from_user.username:
+                                        username = f"@{message.from_user.username}"
+                                    elif message.from_user.full_name:
+                                        username = message.from_user.full_name
+                                    else:
+                                        username = f"ID {message.from_user.id}"
+                                    
+                                    try:
+                                        # Регистрируем пользователя, если его нет
+                                        try:
+                                            await register_user(
+                                                user_id=message.from_user.id,
+                                                username=message.from_user.username,
+                                                full_name=message.from_user.full_name
+                                            )
+                                        except Exception as reg_error:
+                                            logger.warning(f"⚠️ Ошибка при регистрации пользователя {message.from_user.id}: {reg_error}")
+                                        
+                                        # Выдаем варн за нарушение blacklist в PDF или подписи
+                                        await add_warn(
+                                            user_id=message.from_user.id,
+                                            reason="Использование запрещенных слов/выражений в PDF документе или подписи (blacklist)",
+                                            admin_id=None
+                                        )
+                                        warn_count = await get_user_warns_count(message.from_user.id)
+                                    except Exception as e:
+                                        logger.error(f"⚠️ Ошибка при обработке пользователя: {e}", exc_info=True)
+                                        if warn_count == 0:
+                                            warn_count = 1
+                                    
+                                    # Отправляем уведомление
+                                    warning_msg = (
+                                        f"{username}, ⚠️ Ваше сообщение удалено из-за использования запрещенных слов/выражений в PDF документе или подписи.\n"
+                                        f"Предупреждений: {warn_count}/3\n"
+                                        f"После трех предупреждений Вам запретят на 24 часа комментировать посты."
+                                    )
+                                    
+                                    try:
+                                        await message.reply(warning_msg)
+                                        logger.info(f"✅ Уведомление отправлено пользователю {username_display}")
+                                    except Exception as reply_error:
+                                        try:
+                                            await bot.send_message(
+                                                chat_id=message.chat.id,
+                                                text=warning_msg
+                                            )
+                                        except Exception:
+                                            pass
+                                    
+                                    # Удаляем сообщение
+                                    try:
+                                        await message.delete()
+                                        logger.info(f"✅ Комментарий {message.message_id} с запрещенной лексикой в PDF удален")
+                                    except Exception as delete_error:
+                                        logger.error(f"⚠️ Ошибка при удалении сообщения: {delete_error}")
+                                    
+                                    # Если 3+ варнов → автоматический бан
+                                    if warn_count >= 3:
+                                        try:
+                                            await ban_user(
+                                                user_id=message.from_user.id,
+                                                reason="Автоматический бан за 3+ варнов (нарушение blacklist в PDF)",
+                                                days=1,
+                                                admin_id=None
+                                            )
+                                            await bot.send_message(
+                                                chat_id=message.chat.id,
+                                                text=f"❌ Пользователь {username_display} автоматически забанен на 24 часа за превышение лимита предупреждений (3+ варнов)."
+                                            )
+                                        except Exception as ban_error:
+                                            logger.error(f"⚠️ Ошибка при автоматическом бане: {ban_error}")
+                                    
+                                    return  # Прерываем обработку комментария
+                        
+                        # Проверяем blacklist для других документов (txt, docx, xlsx, pptx, odt) - подпись + текст из документа
+                        # Извлекаем текст из документа из полного контента (если есть)
+                        document_text_content = None
+                        document_extension = None
+                        # Проверяем все поддерживаемые форматы
+                        supported_extensions = ['.txt', '.docx', '.xlsx', '.pptx', '.odt']
+                        for ext in supported_extensions:
+                            if f"Текст из документа {ext}:" in user_comment_full:
+                                # Извлекаем текст из документа
+                                parts = user_comment_full.split(f"Текст из документа {ext}:")
+                                if len(parts) > 1:
+                                    document_text_content = parts[1].strip()
+                                    document_extension = ext
+                                    logger.info(f"Извлечен текст из документа {ext}: {len(document_text_content)} символов")
+                                    break
+                        
+                        if document_text_content and document_extension:
+                            # Собираем подпись + текст из документа для проверки blacklist
+                            caption = message.caption or ""
+                            document_content_for_check = f"{caption} {document_text_content}".strip()
+                            logger.info(f"Проверяем blacklist для подписи + текста из документа {document_extension}: {document_content_for_check[:200]}...")
+                            
+                            # Проверяем blacklist для подписи + текста из документа
+                            if await check_message_for_blacklist(document_content_for_check):
+                                logger.warning(f"⚠️ Документ {document_extension} или подпись содержат запрещенную лексику, удаляем комментарий")
+                                # Удаляем комментарий и выдаем варн (логика аналогична проверке blacklist выше)
+                                username_display = f"@{message.from_user.username}" if message.from_user.username else f"ID {message.from_user.id}"
+                                warn_count = 0
+                                
+                                if message.from_user.username:
+                                    username = f"@{message.from_user.username}"
+                                elif message.from_user.full_name:
+                                    username = message.from_user.full_name
+                                else:
+                                    username = f"ID {message.from_user.id}"
+                                
+                                try:
+                                    # Регистрируем пользователя, если его нет
+                                    try:
+                                        await register_user(
+                                            user_id=message.from_user.id,
+                                            username=message.from_user.username,
+                                            full_name=message.from_user.full_name
+                                        )
+                                    except Exception as reg_error:
+                                        logger.warning(f"⚠️ Ошибка при регистрации пользователя {message.from_user.id}: {reg_error}")
+                                    
+                                    # Выдаем варн за нарушение blacklist в документе или подписи
+                                    await add_warn(
+                                        user_id=message.from_user.id,
+                                        reason=f"Использование запрещенных слов/выражений в документе {document_extension} или подписи (blacklist)",
+                                        admin_id=None
+                                    )
+                                    warn_count = await get_user_warns_count(message.from_user.id)
+                                except Exception as e:
+                                    logger.error(f"⚠️ Ошибка при обработке пользователя: {e}", exc_info=True)
+                                    if warn_count == 0:
+                                        warn_count = 1
+                                
+                                # Отправляем уведомление
+                                warning_msg = (
+                                    f"{username}, ⚠️ Ваше сообщение удалено из-за использования запрещенных слов/выражений в документе {document_extension} или подписи.\n"
+                                    f"Предупреждений: {warn_count}/3\n"
+                                    f"После трех предупреждений Вам запретят на 24 часа комментировать посты."
+                                )
+                                
+                                try:
+                                    await message.reply(warning_msg)
+                                    logger.info(f"✅ Уведомление отправлено пользователю {username_display}")
+                                except Exception as reply_error:
+                                    try:
+                                        await bot.send_message(
+                                            chat_id=message.chat.id,
+                                            text=warning_msg
+                                        )
+                                    except Exception:
+                                        pass
+                                
+                                # Удаляем сообщение
+                                try:
+                                    await message.delete()
+                                    logger.info(f"✅ Комментарий {message.message_id} с запрещенной лексикой в документе {document_extension} удален")
+                                except Exception as delete_error:
+                                    logger.error(f"⚠️ Ошибка при удалении сообщения: {delete_error}")
+                                
+                                # Если 3+ варнов → автоматический бан
+                                if warn_count >= 3:
+                                    try:
+                                        await ban_user(
+                                            user_id=message.from_user.id,
+                                            reason=f"Автоматический бан за 3+ варнов (нарушение blacklist в документе {document_extension})",
+                                            days=1,
+                                            admin_id=None
+                                        )
+                                        await bot.send_message(
+                                            chat_id=message.chat.id,
+                                            text=f"❌ Пользователь {username_display} автоматически забанен на 24 часа за превышение лимита предупреждений (3+ варнов)."
+                                        )
+                                    except Exception as ban_error:
+                                        logger.error(f"⚠️ Ошибка при автоматическом бане: {ban_error}")
+                                
+                                return  # Прерываем обработку комментария
+                        
+                        # Используем полный контент (подпись + описание фото/текст из PDF/текст из документов) для формирования ответа
+                        user_comment = user_comment_full
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке контента комментария пользователя: {e}", exc_info=True)
+                        # Используем базовый текст, если обработка не удалась
+                        user_comment = message.text or message.caption or ""
+                        if not user_comment:
+                            return  # Пропускаем сообщения без текста
                 
                 # Получаем контент оригинального поста (если есть)
                 original_post_content = None
                 if message.reply_to_message:
                     try:
-                        ai_clients = get_ai_clients()
-                        if ai_clients:
+                        if ai_clients and ai_clients.openai:
                             original_post_content = await prepare_message_content(
                                 bot, message.reply_to_message, ai_clients.openai
                             )
