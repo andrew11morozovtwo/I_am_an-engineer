@@ -16,6 +16,18 @@ DEFAULT_BLACKLIST = [
     "гондон",
     "гандон",
     
+    # Английские матерные слова и выражения
+    "fuck",
+    "fuck off",
+    "fuck you",
+    "shit",
+    "damn",
+    "bitch",
+    "asshole",
+    "bastard",
+    "crap",
+    "piss off",
+    
     # Спам и реклама
     "бесплатно подписчики",
     "раскрутка канала",

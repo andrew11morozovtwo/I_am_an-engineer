@@ -579,45 +579,41 @@ async def prepare_message_content(
             except Exception as e:
                 logger.error(f"Ошибка при обработке документа {file_extension}: {e}", exc_info=True)
 
-    # ОТКЛЮЧЕНО ДЛЯ ОТЛАДКИ: Обработка голосовых сообщений
-    # if message.voice:
-    #     logger.info("Обнаружено голосовое сообщение, начинаем транскрибацию")
-    #     try:
-    #         transcription = await asyncio.wait_for(
-    #             transcribe_audio(bot, message, openai_client), 
-    #             timeout=60.0
-    #         )
-    #         if transcription:
-    #             logger.info(f"Транскрибация голосового сообщения успешна: {transcription[:100]}...")
-    #             content_parts.append(f"\nТранскрипция аудио: {transcription}")
-    #         else:
-    #             logger.warning("Не удалось транскрибировать голосовое сообщение")
-    #     except asyncio.TimeoutError:
-    #         logger.warning("Таймаут при транскрибации голосового сообщения, пропускаем")
-    #     except Exception as e:
-    #         logger.error(f"Ошибка при транскрибации голосового сообщения: {e}", exc_info=True)
+    # Обработка голосовых сообщений (неблокирующая, с таймаутом)
     if message.voice:
-        logger.info("ОТЛАДКА: Транскрибация голосовых сообщений отключена")
+        logger.info("Обнаружено голосовое сообщение, начинаем транскрибацию")
+        try:
+            transcription = await asyncio.wait_for(
+                transcribe_audio(bot, message, openai_client), 
+                timeout=60.0
+            )
+            if transcription:
+                logger.info(f"Транскрибация голосового сообщения успешна: {transcription[:100]}...")
+                content_parts.append(f"\nТранскрипция аудио: {transcription}")
+            else:
+                logger.warning("Не удалось транскрибировать голосовое сообщение")
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при транскрибации голосового сообщения, пропускаем")
+        except Exception as e:
+            logger.error(f"Ошибка при транскрибации голосового сообщения: {e}", exc_info=True)
 
-    # ОТКЛЮЧЕНО ДЛЯ ОТЛАДКИ: Обработка аудио файлов
-    # if message.audio:
-    #     logger.info("Обнаружено аудио сообщение, начинаем транскрибацию")
-    #     try:
-    #         transcription = await asyncio.wait_for(
-    #             transcribe_audio(bot, message, openai_client), 
-    #             timeout=60.0
-    #         )
-    #         if transcription:
-    #             logger.info(f"Транскрибация аудио файла успешна: {transcription[:100]}...")
-    #             content_parts.append(f"\nТранскрипция аудио: {transcription}")
-    #         else:
-    #             logger.warning("Не удалось транскрибировать аудио файл")
-    #     except asyncio.TimeoutError:
-    #         logger.warning("Таймаут при транскрибации аудио файла, пропускаем")
-    #     except Exception as e:
-    #         logger.error(f"Ошибка при транскрибации аудио файла: {e}", exc_info=True)
+    # Обработка аудио файлов (неблокирующая, с таймаутом)
     if message.audio:
-        logger.info("ОТЛАДКА: Транскрибация аудио файлов отключена")
+        logger.info("Обнаружено аудио сообщение, начинаем транскрибацию")
+        try:
+            transcription = await asyncio.wait_for(
+                transcribe_audio(bot, message, openai_client), 
+                timeout=60.0
+            )
+            if transcription:
+                logger.info(f"Транскрибация аудио файла успешна: {transcription[:100]}...")
+                content_parts.append(f"\nТранскрипция аудио: {transcription}")
+            else:
+                logger.warning("Не удалось транскрибировать аудио файл")
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при транскрибации аудио файла, пропускаем")
+        except Exception as e:
+            logger.error(f"Ошибка при транскрибации аудио файла: {e}", exc_info=True)
 
     # Обработка опросов
     if message.poll:
