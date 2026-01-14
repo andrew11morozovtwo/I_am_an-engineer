@@ -8,7 +8,7 @@ from app.presentation.routers.user_router import user_router
 from app.presentation.routers.admin_router import admin_router
 from app.presentation.routers.channel_router import channel_router
 from app.infrastructure.db.session import async_init_db, get_async_session
-from app.infrastructure.db.repositories import AdminRepository
+from app.infrastructure.db.repositories import AdminRepository, LogRepository
 from app.application.services.user_service import unban_expired_users, register_user
 from app.infrastructure.ai_clients import init_ai_clients
 from app.application.services.comment_service import CommentService
@@ -32,6 +32,36 @@ async def check_expired_bans_periodically():
             traceback.print_exc()
             # Ждем перед следующей попыткой даже при ошибке
             await asyncio.sleep(60)  # 1 минута при ошибке
+
+async def cleanup_old_logs_periodically():
+    """Фоновая задача для периодической очистки старых логов (для экономии места на диске)"""
+    while True:
+        try:
+            # Очищаем логи каждые 24 часа
+            await asyncio.sleep(86400)  # 24 часа = 86400 секунд
+            
+            async with get_async_session() as session:
+                # Проверяем количество логов
+                logs_count = await LogRepository.get_logs_count(session)
+                
+                # Если логов больше 10000, оставляем только последние 10000
+                if logs_count > 10000:
+                    deleted_count = await LogRepository.keep_recent_logs(session, max_logs=10000)
+                    print(f"🧹 Очищено старых логов: {deleted_count} (осталось 10000)")
+                else:
+                    # Иначе удаляем логи старше 30 дней
+                    deleted_count = await LogRepository.delete_old_logs(session, days=30)
+                    if deleted_count > 0:
+                        print(f"🧹 Удалено логов старше 30 дней: {deleted_count}")
+        except asyncio.CancelledError:
+            # Задача была отменена - это нормально при остановке бота
+            break
+        except Exception as e:
+            print(f"⚠️ Ошибка при очистке старых логов: {e}")
+            import traceback
+            traceback.print_exc()
+            # Ждем перед следующей попыткой даже при ошибке
+            await asyncio.sleep(3600)  # 1 час при ошибке
 
 async def initialize_admins():
     """
@@ -158,11 +188,15 @@ async def main():
     # Даем время для завершения всех операций с вебхуком
     await asyncio.sleep(1)
     
-    # Запускаем фоновую задачу для проверки истекших банов
+    # Запускаем фоновые задачи
     ban_check_task = None
+    logs_cleanup_task = None
     try:
         ban_check_task = asyncio.create_task(check_expired_bans_periodically())
         print("✅ Запущена фоновая задача для проверки истекших банов (каждый час)")
+        
+        logs_cleanup_task = asyncio.create_task(cleanup_old_logs_periodically())
+        print("✅ Запущена фоновая задача для очистки старых логов (каждые 24 часа)")
         
         await dp.start_polling(bot, drop_pending_updates=True)
     except KeyboardInterrupt:
@@ -175,7 +209,7 @@ async def main():
         import traceback
         traceback.print_exc()
     finally:
-        # Отменяем фоновую задачу
+        # Отменяем фоновые задачи
         if ban_check_task:
             try:
                 ban_check_task.cancel()
@@ -185,7 +219,18 @@ async def main():
                     pass  # Нормально - задача отменена
                 print("✅ Фоновая задача проверки банов остановлена")
             except Exception as e:
-                print(f"⚠️ Ошибка при остановке фоновой задачи: {e}")
+                print(f"⚠️ Ошибка при остановке фоновой задачи проверки банов: {e}")
+        
+        if logs_cleanup_task:
+            try:
+                logs_cleanup_task.cancel()
+                try:
+                    await logs_cleanup_task
+                except asyncio.CancelledError:
+                    pass  # Нормально - задача отменена
+                print("✅ Фоновая задача очистки логов остановлена")
+            except Exception as e:
+                print(f"⚠️ Ошибка при остановке фоновой задачи очистки логов: {e}")
         
         # Корректно закрываем сессию бота
         try:

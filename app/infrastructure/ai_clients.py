@@ -104,5 +104,6 @@ def init_ai_clients() -> AIClients:
     :raises RuntimeError: при ошибке инициализации обязательных клиентов (например, OpenAI).
     """
     openai_client = create_openai_client()
-    gemini_client = create_gemini_client()
+    # gemini_client = create_gemini_client()  # Закомментировано - Gemini не используется
+    gemini_client = None
     return AIClients(openai=openai_client, gemini=gemini_client)

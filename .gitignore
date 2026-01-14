@@ -1,3 +1,6 @@
+# Reports
+ОТЧЕТ_О_РАБОТОСПОСОБНОСТИ.md
+
 # Python
 __pycache__/
 *.py[cod]
@@ -45,6 +48,9 @@ app.db
 
 # Logs
 *.log
+
+# Exported logs (Excel files)
+logs_export_*.xlsx
 
 # OS
 .DS_Store

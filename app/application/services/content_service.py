@@ -42,8 +42,10 @@ if load_workbook is None:
 if Presentation is None:
     logger.warning("python-pptx не установлен, обработка PowerPoint файлов будет недоступна")
 
-
-logger = logging.getLogger(__name__)
+# Ограничения для работы на ограниченных ресурсах (768 MB RAM)
+MAX_FILE_SIZE_MB = 10  # Максимальный размер файла для обработки (в MB)
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024  # 10 MB в байтах
+MAX_TEXT_LENGTH = 8000  # Максимальная длина извлеченного текста (уменьшено с 12000 для экономии памяти)
 
 
 async def extract_text_from_url(url: str) -> Optional[str]:
@@ -174,7 +176,20 @@ async def extract_pdf_text(pdf_url: str) -> Optional[str]:
         async with aiohttp.ClientSession() as session:
             async with session.get(pdf_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
                 response.raise_for_status()
+                
+                # Проверяем размер файла перед загрузкой
+                content_length = response.headers.get('Content-Length')
+                if content_length and int(content_length) > MAX_FILE_SIZE_BYTES:
+                    logger.warning(f"PDF файл слишком большой ({int(content_length) / 1024 / 1024:.2f} MB), максимум {MAX_FILE_SIZE_MB} MB")
+                    return None
+                
                 pdf_content = await response.read()
+                
+                # Дополнительная проверка после загрузки
+                if len(pdf_content) > MAX_FILE_SIZE_BYTES:
+                    logger.warning(f"PDF файл слишком большой ({len(pdf_content) / 1024 / 1024:.2f} MB), максимум {MAX_FILE_SIZE_MB} MB")
+                    return None
+                
                 logger.info(f"PDF файл скачан, размер: {len(pdf_content)} байт")
                 pdf_file = io.BytesIO(pdf_content)
                 pdf_reader = PdfReader(pdf_file)
@@ -193,9 +208,9 @@ async def extract_pdf_text(pdf_url: str) -> Optional[str]:
                     logger.warning(f"Из PDF {pdf_url[:100]}... не удалось извлечь текст.")
                     return None
 
-                # Ограничиваем размер текста (примерно 4000 токенов)
-                if len(pdf_text) > 12000:
-                    pdf_text = pdf_text[:12000] + "\n... (текст обрезан из-за ограничений)"
+                # Ограничиваем размер текста для экономии памяти
+                if len(pdf_text) > MAX_TEXT_LENGTH:
+                    pdf_text = pdf_text[:MAX_TEXT_LENGTH] + "\n... (текст обрезан из-за ограничений)"
                 
                 logger.info(f"Текст из PDF {pdf_url[:100]}... успешно извлечен ({len(pdf_text)} символов).")
                 return pdf_text
@@ -228,7 +243,20 @@ async def extract_document_text(document_url: str, file_extension: str) -> Optio
         async with aiohttp.ClientSession() as session:
             async with session.get(document_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
                 response.raise_for_status()
+                
+                # Проверяем размер файла перед загрузкой
+                content_length = response.headers.get('Content-Length')
+                if content_length and int(content_length) > MAX_FILE_SIZE_BYTES:
+                    logger.warning(f"Документ слишком большой ({int(content_length) / 1024 / 1024:.2f} MB), максимум {MAX_FILE_SIZE_MB} MB")
+                    return None
+                
                 document_content = await response.read()
+                
+                # Дополнительная проверка после загрузки
+                if len(document_content) > MAX_FILE_SIZE_BYTES:
+                    logger.warning(f"Документ слишком большой ({len(document_content) / 1024 / 1024:.2f} MB), максимум {MAX_FILE_SIZE_MB} MB")
+                    return None
+                
                 logger.info(f"Документ скачан, размер: {len(document_content)} байт")
                 document_file = io.BytesIO(document_content)
                 
@@ -340,9 +368,9 @@ async def extract_document_text(document_url: str, file_extension: str) -> Optio
                     logger.warning(f"Из документа {file_extension} не удалось извлечь текст.")
                     return None
                 
-                # Ограничиваем размер текста (примерно 4000 токенов)
-                if len(document_text) > 12000:
-                    document_text = document_text[:12000] + "\n... (текст обрезан из-за ограничений)"
+                # Ограничиваем размер текста для экономии памяти
+                if len(document_text) > MAX_TEXT_LENGTH:
+                    document_text = document_text[:MAX_TEXT_LENGTH] + "\n... (текст обрезан из-за ограничений)"
                 
                 logger.info(f"Текст из документа {file_extension} успешно извлечен ({len(document_text)} символов).")
                 return document_text
@@ -423,7 +451,20 @@ async def transcribe_audio(bot: Bot, message: types.Message, openai_client) -> O
         async with aiohttp.ClientSession() as session:
             async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
                 response.raise_for_status()
+                
+                # Проверяем размер файла перед загрузкой
+                content_length = response.headers.get('Content-Length')
+                if content_length and int(content_length) > MAX_FILE_SIZE_BYTES:
+                    logger.warning(f"Аудио файл слишком большой ({int(content_length) / 1024 / 1024:.2f} MB), максимум {MAX_FILE_SIZE_MB} MB")
+                    return None
+                
                 audio_content = await response.read()
+                
+                # Дополнительная проверка после загрузки
+                if len(audio_content) > MAX_FILE_SIZE_BYTES:
+                    logger.warning(f"Аудио файл слишком большой ({len(audio_content) / 1024 / 1024:.2f} MB), максимум {MAX_FILE_SIZE_MB} MB")
+                    return None
+                
                 logger.info(f"Аудио файл скачан, размер: {len(audio_content)} байт")
 
         # Транскрибируем через OpenAI Whisper

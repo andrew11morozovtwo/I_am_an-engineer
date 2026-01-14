@@ -9,6 +9,10 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
+# Ограничения для работы на ограниченных ресурсах (768 MB RAM)
+MAX_CONVERSATION_HISTORY_CHATS = 10  # Максимум чатов с историей
+MAX_MESSAGES_PER_CHAT = 3  # Максимум сообщений в истории на чат (уменьшено с 5)
+
 # Системный промпт для генерации комментариев
 COMMENT_SYSTEM_PROMPT = (
     "Вы бот-администратор в телеграм-канале 'Я-Инженер'. Ваша задача — писать первый комментарий к постам на русском языке. "
@@ -134,8 +138,8 @@ class CommentService:
 
             # Если есть история разговора, добавляем её (для контекста)
             if chat_id and chat_id in self.conversation_history:
-                # Берем последние 5 сообщений из истории для контекста
-                history = self.conversation_history[chat_id][-5:]
+                # Берем последние N сообщений из истории для контекста
+                history = self.conversation_history[chat_id][-MAX_MESSAGES_PER_CHAT:]
                 messages = [{"role": "system", "content": COMMENT_SYSTEM_PROMPT}] + history + [
                     {"role": "user", "content": post_content}
                 ]
@@ -149,12 +153,16 @@ class CommentService:
 
             comment = response.choices[0].message.content
 
-            # Сохраняем в историю
+            # Сохраняем в историю с ограничениями
             if chat_id:
+                self._manage_conversation_history(chat_id)
                 if chat_id not in self.conversation_history:
                     self.conversation_history[chat_id] = []
                 self.conversation_history[chat_id].append({"role": "user", "content": post_content})
                 self.conversation_history[chat_id].append({"role": "assistant", "content": comment})
+                # Ограничиваем количество сообщений в истории
+                if len(self.conversation_history[chat_id]) > MAX_MESSAGES_PER_CHAT * 2:  # *2 т.к. user + assistant
+                    self.conversation_history[chat_id] = self.conversation_history[chat_id][-MAX_MESSAGES_PER_CHAT * 2:]
 
             return comment
         except Exception as e:
@@ -195,17 +203,35 @@ class CommentService:
 
             reply = response.choices[0].message.content
 
-            # Сохраняем в историю
+            # Сохраняем в историю с ограничениями
             if chat_id:
+                self._manage_conversation_history(chat_id)
                 if chat_id not in self.conversation_history:
                     self.conversation_history[chat_id] = []
                 self.conversation_history[chat_id].append({"role": "user", "content": user_comment})
                 self.conversation_history[chat_id].append({"role": "assistant", "content": reply})
+                # Ограничиваем количество сообщений в истории
+                if len(self.conversation_history[chat_id]) > MAX_MESSAGES_PER_CHAT * 2:  # *2 т.к. user + assistant
+                    self.conversation_history[chat_id] = self.conversation_history[chat_id][-MAX_MESSAGES_PER_CHAT * 2:]
 
             return reply
         except Exception as e:
             logger.error(f"Ошибка при генерации ответа на комментарий: {e}")
             return None
+
+    def _manage_conversation_history(self, chat_id: int):
+        """
+        Управляет историей разговоров: ограничивает количество чатов и очищает старые.
+        
+        :param chat_id: ID текущего чата
+        """
+        # Если превышен лимит чатов, удаляем самый старый (FIFO)
+        if len(self.conversation_history) >= MAX_CONVERSATION_HISTORY_CHATS:
+            if chat_id not in self.conversation_history:
+                # Удаляем первый (самый старый) чат
+                oldest_chat_id = next(iter(self.conversation_history))
+                del self.conversation_history[oldest_chat_id]
+                logger.debug(f"Удалена история для чата {oldest_chat_id} (превышен лимит {MAX_CONVERSATION_HISTORY_CHATS} чатов)")
 
     def clear_history(self, chat_id: int):
         """

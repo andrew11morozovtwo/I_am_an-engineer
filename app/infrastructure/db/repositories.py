@@ -164,6 +164,54 @@ class LogRepository:
     async def get_recent(session: AsyncSession, limit: int = 5) -> List[Log]:
         q = await session.execute(select(Log).order_by(Log.created_at.desc()).limit(limit))
         return q.scalars().all()
+    
+    @staticmethod
+    async def delete_old_logs(session: AsyncSession, days: int = 30) -> int:
+        """
+        Удаляет логи старше указанного количества дней.
+        
+        :param session: Сессия БД
+        :param days: Количество дней (по умолчанию 30)
+        :return: Количество удаленных логов
+        """
+        cutoff_date = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        result = await session.execute(
+            delete(Log).where(Log.created_at < cutoff_date)
+        )
+        await session.commit()
+        return result.rowcount
+    
+    @staticmethod
+    async def get_logs_count(session: AsyncSession) -> int:
+        """Возвращает общее количество логов в БД."""
+        result = await session.execute(select(func.count(Log.id)))
+        return result.scalar() or 0
+    
+    @staticmethod
+    async def keep_recent_logs(session: AsyncSession, max_logs: int = 10000) -> int:
+        """
+        Оставляет только последние N логов, удаляет остальные.
+        Используется для ограничения размера БД на ограниченных ресурсах.
+        
+        :param session: Сессия БД
+        :param max_logs: Максимальное количество логов для хранения (по умолчанию 10000)
+        :return: Количество удаленных логов
+        """
+        # Получаем ID последних N логов
+        result = await session.execute(
+            select(Log.id).order_by(Log.created_at.desc()).limit(max_logs)
+        )
+        keep_ids = {row[0] for row in result.all()}
+        
+        if not keep_ids:
+            return 0
+        
+        # Удаляем все логи, кроме последних N
+        result = await session.execute(
+            delete(Log).where(~Log.id.in_(keep_ids))
+        )
+        await session.commit()
+        return result.rowcount
 
 class AdminRepository:
     """Репозиторий для управления администраторами."""
