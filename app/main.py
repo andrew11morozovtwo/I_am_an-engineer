@@ -1,5 +1,5 @@
 """
-Entry point for the AdminBot project.
+Entry point for the Telegram bot project.
 """
 import asyncio
 from aiogram import Bot, Dispatcher

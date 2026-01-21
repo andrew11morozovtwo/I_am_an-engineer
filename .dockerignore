@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+# .env файл НЕ включается в образ (безопасность)
+# Переменные передаются через docker-compose.yml -> env_file: и environment:
+# .env файл должен находиться на хосте в той же директории, что и docker-compose.yml
+.env
+.env.local
+
+# Database (будет в volume)
+*.db
+*.sqlite
+*.sqlite3
+app.db
+
+# Logs
+*.log
+
+# Exported logs (Excel files)
+logs_export_*.xlsx
+
+# Reports
+ОТЧЕТ_О_РАБОТОСПОСОБНОСТИ.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker (не нужны в образе, но используются для сборки)
+Dockerfile
+docker-compose.yml
+docker-compose.prod.yml
+.dockerignore
+
+# Documentation (не нужна в контейнере - экономит место)
+README.md
+DOCKER.md
+QUICKSTART_DOCKER.md
+GITHUB_PUSH_INSTRUCTIONS.md
+
+# Примеры и конфиги для разработки
+env.example
+
+# Scripts (все скрипты для сборки, публикации, проверки - не нужны в образе)
+*.ps1
+*.bat
+*.sh
+
+# Временные и тестовые файлы
+*.tmp
+*.temp
+check_bot_*.ps1
+clear_warns_bans.*

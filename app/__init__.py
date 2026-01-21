@@ -1,1 +1,1 @@
-# AdminBot package
+# Telegram bot package

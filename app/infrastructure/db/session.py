@@ -1,5 +1,5 @@
 """
-Async SQLAlchemy engine/session setup for AdminBot (using SQLite).
+Async SQLAlchemy engine/session setup for Telegram bot (using SQLite).
 Include table init util.
 """
 from contextlib import asynccontextmanager

@@ -1,0 +1,41 @@
+services:
+  adminbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: adminbot
+    restart: unless-stopped
+    # Читаем переменные окружения из .env файла на хосте
+    env_file:
+      - .env
+    environment:
+      # Переопределяем или устанавливаем переменные (если нужно)
+      # Telegram Bot Token (обязательно)
+      - BOT_TOKEN=${BOT_TOKEN}
+      # Начальные администраторы (через запятую)
+      - ADMIN_IDS=${ADMIN_IDS:-}
+      # Главный администратор (разработчик/заказчик)
+      - OWNER_ID=${OWNER_ID:-0}
+      # URL базы данных (по умолчанию SQLite)
+      - DB_URL=${DB_URL:-sqlite+aiosqlite:///data/app.db}
+      # OpenAI API Key (для AI-функций)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Gemini API Key (опционально)
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      # Сохраняем базу данных на хосте
+      - ./data:/app/data
+      # Опционально: монтируем .env файл (если нужно)
+      # - ./.env:/app/.env:ro
+    networks:
+      - adminbot-network
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  adminbot-network:
+    driver: bridge

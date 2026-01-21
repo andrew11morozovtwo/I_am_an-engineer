@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     ADMIN_IDS: str = Field(default="", env="ADMIN_IDS")  # строка через запятую (начальные админы)
     OWNER_ID: int = Field(default=0, env="OWNER_ID")  # Главный администратор (разработчик/заказчик)
     DB_URL: str = Field("sqlite+aiosqlite:///app.db", env="DB_URL")
+    OPENAI_API_KEY: str = Field(default="", env="OPENAI_API_KEY")  # OpenAI API Key для AI-функций
+    GEMINI_API_KEY: str = Field(default="", env="GEMINI_API_KEY")  # Gemini API Key (опционально)
 
     @staticmethod
     def parse_admin_ids(admin_ids_str: str) -> List[int]:

@@ -12,14 +12,23 @@ from app.application.services.log_service import get_recent_logs
 from app.infrastructure.db.session import async_init_db
 
 
-async def export_logs_to_excel(limit: int = 100, output_dir: str = "."):
+async def export_logs_to_excel(limit: int = 100, output_dir: str = None):
     """
     Экспортирует последние логи в Excel файл.
     
     Args:
         limit: Количество последних логов для экспорта (по умолчанию 100)
-        output_dir: Директория для сохранения файла (по умолчанию текущая)
+        output_dir: Директория для сохранения файла (по умолчанию ./data или /app/data в Docker)
     """
+    # Определяем директорию для сохранения файлов
+    if output_dir is None:
+        # В Docker используем /app/data, локально - ./data
+        data_dir = Path("/app/data")
+        if not data_dir.exists():
+            data_dir = Path("./data")
+            if not data_dir.exists():
+                data_dir = Path(".")
+        output_dir = str(data_dir)
     # Инициализируем БД (на случай если файла нет)
     await async_init_db()
     
@@ -99,7 +108,11 @@ async def export_logs_to_excel(limit: int = 100, output_dir: str = "."):
 async def main():
     """Главная функция"""
     try:
-        await export_logs_to_excel(limit=100)
+        # Используем директорию data для сохранения файлов
+        data_dir = Path("/app/data") if Path("/app/data").exists() else Path("./data")
+        if not data_dir.exists():
+            data_dir.mkdir(parents=True, exist_ok=True)
+        await export_logs_to_excel(limit=100, output_dir=str(data_dir))
     except Exception as e:
         print(f"❌ Ошибка при экспорте логов: {e}")
         import traceback

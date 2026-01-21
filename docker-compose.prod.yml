@@ -1,0 +1,43 @@
+services:
+  adminbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: adminbot-prod
+    restart: always
+    # Читаем переменные окружения из .env файла на хосте
+    env_file:
+      - .env
+    environment:
+      # Переопределяем или устанавливаем переменные (если нужно)
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS:-}
+      - OWNER_ID=${OWNER_ID:-0}
+      - DB_URL=${DB_URL:-sqlite+aiosqlite:///data/app.db}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      # Используем именованный volume для продакшена
+      - adminbot-data:/app/data
+    networks:
+      - adminbot-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    # Ограничения ресурсов (опционально)
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+        reservations:
+          memory: 256M
+
+volumes:
+  adminbot-data:
+    driver: local
+
+networks:
+  adminbot-network:
+    driver: bridge
