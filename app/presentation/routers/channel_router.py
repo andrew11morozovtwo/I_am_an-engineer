@@ -205,6 +205,30 @@ async def new_channel_post_handler(message: types.Message, bot: Bot):
                     timeout=30.0
                 )
                 logger.info(f"✅ AI комментарий отправлен к посту {message.message_id}")
+                
+                # Сохраняем первый комментарий бота в БД
+                try:
+                    from app.infrastructure.db.session import get_async_session
+                    from app.infrastructure.db.repositories import PostCommentRepository
+                    from app.infrastructure.db.models import PostComment
+                    
+                    async with get_async_session() as session:
+                        # Определяем тип контента (в данном случае всегда текст)
+                        content_type = "text"
+                        
+                        comment_record = PostComment(
+                            post_message_id=message.message_id,
+                            comment_message_id=sent_message.message_id,
+                            user_id=None,  # Комментарий от бота
+                            is_bot_comment=True,
+                            content=comment_text,
+                            content_type=content_type
+                        )
+                        await PostCommentRepository.add(session, comment_record)
+                        logger.info(f"✅ Комментарий бота сохранен в БД: post_id={message.message_id}, comment_id={sent_message.message_id}")
+                except Exception as save_error:
+                    logger.error(f"⚠️ Ошибка при сохранении комментария бота в БД: {save_error}", exc_info=True)
+                
                 break  # Успешно отправлено, выходим из цикла
             except asyncio.TimeoutError:
                 if attempt < max_retries - 1:
@@ -283,135 +307,146 @@ async def discussion_message_handler(message: types.Message, bot: Bot):
             return
     
     # Проверка 2: Blacklist (проверяем текст и подпись к медиа)
-    message_text = (message.text or "") + " " + (message.caption or "")
-    if await check_message_for_blacklist(message_text.strip()):
-        # ВАЖНО: Сначала обрабатываем пользователя и готовим уведомление, ПОТОМ удаляем сообщение
-        username_display = f"@{message.from_user.username}" if message.from_user.username else f"ID {message.from_user.id}"
-        warn_count = 0
-        sent_notification = None
-        
-        # Формируем username для сообщения
-        if message.from_user.username:
-            username = f"@{message.from_user.username}"
-        elif message.from_user.full_name:
-            username = message.from_user.full_name
+    # ВАЖНО: Проверяем даже если текст пустой (может быть только подпись или медиа)
+    message_text = ""
+    if message.text:
+        message_text += message.text
+    if message.caption:
+        if message_text:
+            message_text += " " + message.caption
         else:
-            username = f"ID {message.from_user.id}"
-        
-        try:
-            # Регистрируем пользователя, если его нет
-            try:
-                await register_user(
-                    message.from_user.id,
-                    username=message.from_user.username,
-                    full_name=message.from_user.full_name
-                )
-            except Exception as reg_error:
-                logger.warning(f"⚠️ Ошибка при регистрации пользователя {message.from_user.id}: {reg_error}")
-                # Продолжаем работу, возможно пользователь уже есть
+            message_text = message.caption
+    
+    # Проверяем текст/подпись, если они есть
+    if message_text.strip():
+        if await check_message_for_blacklist(message_text.strip()):
+            # ВАЖНО: Сначала обрабатываем пользователя и готовим уведомление, ПОТОМ удаляем сообщение
+            username_display = f"@{message.from_user.username}" if message.from_user.username else f"ID {message.from_user.id}"
+            warn_count = 0
+            sent_notification = None
             
-            # Выдаем варн за нарушение blacklist
-            try:
-                await add_warn(
-                    message.from_user.id,
-                    reason="Использование запрещенных слов/выражений (blacklist)",
-                    admin_id=None  # Автоматический варн
-                )
-                # Получаем обновленное количество варнов
-                warn_count = await get_user_warns_count(message.from_user.id)
-            except Exception as warn_error:
-                logger.warning(f"⚠️ Ошибка при выдаче варна: {warn_error}")
-                # Пытаемся получить текущее количество варнов
-                try:
-                    warn_count = await get_user_warns_count(message.from_user.id) or 0
-                except:
-                    warn_count = 1  # По умолчанию считаем, что выдали 1 варн
+            # Формируем username для сообщения
+            if message.from_user.username:
+                username = f"@{message.from_user.username}"
+            elif message.from_user.full_name:
+                username = message.from_user.full_name
+            else:
+                username = f"ID {message.from_user.id}"
             
-        except Exception as e:
-            logger.error(f"⚠️ Ошибка при обработке пользователя: {e}")
-            import traceback
-            traceback.print_exc()
-            # Если не удалось получить warn_count, используем 1 по умолчанию
-            if warn_count == 0:
-                warn_count = 1
-        
-        # ВАЖНО: Формируем сообщение с НОВЫМ форматом (обновлено по запросу пользователя)
-        # Старый формат был: "⚠️ Ваше сообщение удалено... Варнов: 2/3"
-        # Новый формат: "@username, ⚠️ Ваше сообщение удалено... Предупреждений: 2/3\nПосле трех предупреждений..."
-        warning_msg = (
-            f"{username}, ⚠️ Ваше сообщение удалено из-за использования запрещенных слов/выражений.\n"
-            f"Предупреждений: {warn_count}/3\n"
-            f"После трех предупреждений Вам запретят на 24 часа комментировать посты."
-        )
-        
-        # КРИТИЧЕСКИ ВАЖНО: Отправляем уведомление ДО удаления сообщения (чтобы reply работал)
-        try:
-            # Сначала пытаемся отправить reply к исходному сообщению
-            sent_notification = await message.reply(warning_msg)
-            logger.info(f"✅ Уведомление отправлено пользователю {username_display}: {warning_msg[:60]}...")
-        except Exception as reply_error:
-            logger.warning(f"⚠️ Ошибка reply, пробуем send_message: {reply_error}")
-            # Если reply не удался (нет прав), отправляем в чат без reply
             try:
-                sent_notification = await bot.send_message(
-                    chat_id=message.chat.id,
-                    text=warning_msg
-                )
-                logger.info(f"✅ Уведомление отправлено пользователю {username_display} (в чат): {warning_msg[:60]}...")
-            except Exception as send_error:
-                logger.error(f"⚠️ Не удалось отправить уведомление в чат: {send_error}")
-                sent_notification = None
-        
-        # ТЕПЕРЬ удаляем сообщение (после отправки уведомления)
-        try:
-            await message.delete()
-            logger.info(f"✅ Сообщение {message.message_id} от пользователя {message.from_user.id} удалено из-за blacklist")
-        except Exception as delete_error:
-            logger.error(f"⚠️ Ошибка при удалении сообщения: {delete_error}")
-            # Если не удалось удалить, отправляем дополнительное предупреждение
-            if sent_notification:
+                # Регистрируем пользователя, если его нет
                 try:
-                    await bot.send_message(
-                        chat_id=message.chat.id,
-                        text=f"❌ Не удалось удалить сообщение, но пользователю {username_display} выдан варн ({warn_count}/3)"
+                    await register_user(
+                        message.from_user.id,
+                        username=message.from_user.username,
+                        full_name=message.from_user.full_name
                     )
-                except:
-                    pass
-        
-        # Логируем (если удастся)
-        try:
-            from app.infrastructure.db.session import get_async_session
-            from app.infrastructure.db.repositories import LogRepository
-            from app.infrastructure.db.models import Log
-            async with get_async_session() as session:
-                await LogRepository.add(session, Log(
-                    event_type="message_deleted_blacklist",
-                    user_id=message.from_user.id,
-                    message=f"Сообщение {message.message_id} удалено из-за blacklist, выдан варн ({warn_count}/3)"
-                ))
-        except Exception as log_error:
-            logger.error(f"⚠️ Ошибка при логировании: {log_error}")
-        
-        # Если 3+ варнов → автоматический бан на 24 часа
-        if warn_count >= 3:
+                except Exception as reg_error:
+                    logger.warning(f"⚠️ Ошибка при регистрации пользователя {message.from_user.id}: {reg_error}")
+                    # Продолжаем работу, возможно пользователь уже есть
+                
+                # Выдаем варн за нарушение blacklist
+                try:
+                    await add_warn(
+                        message.from_user.id,
+                        reason="Использование запрещенных слов/выражений (blacklist)",
+                        admin_id=None  # Автоматический варн
+                    )
+                    # Получаем обновленное количество варнов
+                    warn_count = await get_user_warns_count(message.from_user.id)
+                except Exception as warn_error:
+                    logger.warning(f"⚠️ Ошибка при выдаче варна: {warn_error}")
+                    # Пытаемся получить текущее количество варнов
+                    try:
+                        warn_count = await get_user_warns_count(message.from_user.id) or 0
+                    except:
+                        warn_count = 1  # По умолчанию считаем, что выдали 1 варн
+                
+            except Exception as e:
+                logger.error(f"⚠️ Ошибка при обработке пользователя: {e}")
+                import traceback
+                traceback.print_exc()
+                # Если не удалось получить warn_count, используем 1 по умолчанию
+                if warn_count == 0:
+                    warn_count = 1
+            
+            # ВАЖНО: Формируем сообщение с НОВЫМ форматом (обновлено по запросу пользователя)
+            # Старый формат был: "⚠️ Ваше сообщение удалено... Варнов: 2/3"
+            # Новый формат: "@username, ⚠️ Ваше сообщение удалено... Предупреждений: 2/3\nПосле трех предупреждений..."
+            warning_msg = (
+                f"{username}, ⚠️ Ваше сообщение удалено из-за использования запрещенных слов/выражений.\n"
+                f"Предупреждений: {warn_count}/3\n"
+                f"После трех предупреждений Вам запретят на 24 часа комментировать посты."
+            )
+            
+            # КРИТИЧЕСКИ ВАЖНО: Отправляем уведомление ДО удаления сообщения (чтобы reply работал)
             try:
-                await ban_user(
-                    message.from_user.id,
-                    reason="Автоматический бан за 3+ варнов (нарушение blacklist)",
-                    days=1,  # Бан на 24 часа (1 день)
-                    admin_id=None
-                )
+                # Сначала пытаемся отправить reply к исходному сообщению
+                sent_notification = await message.reply(warning_msg)
+                logger.info(f"✅ Уведомление отправлено пользователю {username_display}: {warning_msg[:60]}...")
+            except Exception as reply_error:
+                logger.warning(f"⚠️ Ошибка reply, пробуем send_message: {reply_error}")
+                # Если reply не удался (нет прав), отправляем в чат без reply
                 try:
-                    await bot.send_message(
+                    sent_notification = await bot.send_message(
                         chat_id=message.chat.id,
-                        text=f"❌ Пользователь {username_display} автоматически забанен на 24 часа за превышение лимита предупреждений (3+ варнов)."
+                        text=warning_msg
                     )
-                except Exception as ban_notify_error:
-                    logger.warning(f"⚠️ Не удалось отправить уведомление о бане: {ban_notify_error}")
-            except Exception as ban_error:
-                logger.error(f"⚠️ Ошибка при автоматическом бане: {ban_error}")
-        
-        return
+                    logger.info(f"✅ Уведомление отправлено пользователю {username_display} (в чат): {warning_msg[:60]}...")
+                except Exception as send_error:
+                    logger.error(f"⚠️ Не удалось отправить уведомление в чат: {send_error}")
+                    sent_notification = None
+            
+            # ТЕПЕРЬ удаляем сообщение (после отправки уведомления)
+            try:
+                await message.delete()
+                logger.info(f"✅ Сообщение {message.message_id} от пользователя {message.from_user.id} удалено из-за blacklist")
+            except Exception as delete_error:
+                logger.error(f"⚠️ Ошибка при удалении сообщения: {delete_error}")
+                # Если не удалось удалить, отправляем дополнительное предупреждение
+                if sent_notification:
+                    try:
+                        await bot.send_message(
+                            chat_id=message.chat.id,
+                            text=f"❌ Не удалось удалить сообщение, но пользователю {username_display} выдан варн ({warn_count}/3)"
+                        )
+                    except:
+                        pass
+            
+            # Логируем (если удастся)
+            try:
+                from app.infrastructure.db.session import get_async_session
+                from app.infrastructure.db.repositories import LogRepository
+                from app.infrastructure.db.models import Log
+                async with get_async_session() as session:
+                    await LogRepository.add(session, Log(
+                        event_type="message_deleted_blacklist",
+                        user_id=message.from_user.id,
+                        message=f"Сообщение {message.message_id} удалено из-за blacklist, выдан варн ({warn_count}/3)"
+                    ))
+            except Exception as log_error:
+                logger.error(f"⚠️ Ошибка при логировании: {log_error}")
+            
+            # Если 3+ варнов → автоматический бан на 24 часа
+            if warn_count >= 3:
+                try:
+                    await ban_user(
+                        message.from_user.id,
+                        reason="Автоматический бан за 3+ варнов (нарушение blacklist)",
+                        days=1,  # Бан на 24 часа (1 день)
+                        admin_id=None
+                    )
+                    try:
+                        await bot.send_message(
+                            chat_id=message.chat.id,
+                            text=f"❌ Пользователь {username_display} автоматически забанен на 24 часа за превышение лимита предупреждений (3+ варнов)."
+                        )
+                    except Exception as ban_notify_error:
+                        logger.warning(f"⚠️ Не удалось отправить уведомление о бане: {ban_notify_error}")
+                except Exception as ban_error:
+                    logger.error(f"⚠️ Ошибка при автоматическом бане: {ban_error}")
+            
+            return
     
     # Проверка 2.5: Blacklist для медиа-контента (фото, PDF, документы, аудио)
     # Проверяем медиа-контент ДО генерации ответа, чтобы не тратить ресурсы на AI если есть нарушение
@@ -575,6 +610,18 @@ async def discussion_message_handler(message: types.Message, bot: Bot):
         except Exception as e:
             logger.error(f"Ошибка при проверке blacklist для медиа-контента: {e}", exc_info=True)
             # Продолжаем обработку, если проверка медиа не удалась
+    else:
+        # Если AI клиенты недоступны, проверяем хотя бы текст/подпись к медиа
+        # Это важно, чтобы не пропустить запрещенные слова в подписях к фото/документам
+        if message.photo or message.document or message.voice or message.audio or message.video:
+            # Проверяем только текст/подпись, если они есть
+            if message_text.strip():
+                logger.info(f"AI клиенты недоступны, проверяем только текст/подпись к медиа: '{message_text[:100]}...'")
+                if await check_and_handle_blacklist_violation(
+                    bot, message, "в тексте/подписи к медиа-контенту", message_text.strip()
+                ):
+                    logger.info(f"✅ Нарушение blacklist найдено в тексте/подписи к медиа, сообщение удалено")
+                    return  # Сообщение удалено, прерываем обработку
     
     # 3. AI-ответ на комментарий пользователя
     # ВАЖНО: Проверка blacklist для всех медиа уже выполнена выше (строка 411)
@@ -612,23 +659,117 @@ async def discussion_message_handler(message: types.Message, bot: Bot):
                         if not user_comment:
                             return  # Пропускаем сообщения без текста
                 
-                # Получаем контент оригинального поста (если есть)
+                # Находим оригинальный пост (идем по цепочке reply_to_message)
+                original_post = None
+                post_message_id = None
+                current_message = message.reply_to_message
+                
+                while current_message:
+                    # Если это сообщение от канала (пост), то это оригинальный пост
+                    if current_message.sender_chat and current_message.sender_chat.type == "channel":
+                        original_post = current_message
+                        post_message_id = current_message.message_id
+                        break
+                    # Если это пересланное сообщение из канала
+                    if current_message.forward_from_chat and current_message.forward_from_chat.type == "channel":
+                        original_post = current_message
+                        # Для пересланных сообщений используем forward_from_message_id если доступен
+                        post_message_id = getattr(current_message, 'forward_from_message_id', None) or current_message.message_id
+                        break
+                    # Продолжаем искать вверх по цепочке
+                    current_message = current_message.reply_to_message
+                
+                # Получаем контент оригинального поста (если найден)
                 original_post_content = None
-                if message.reply_to_message:
+                if original_post:
                     try:
                         if ai_clients and ai_clients.openai:
                             original_post_content = await prepare_message_content(
-                                bot, message.reply_to_message, ai_clients.openai
+                                bot, original_post, ai_clients.openai
                             )
                     except Exception as e:
                         logger.warning(f"Не удалось подготовить контент оригинального поста: {e}")
                 
-                # Генерируем ответ через AI
-                reply_text = await comment_service.generate_reply_to_comment(
-                    user_comment=user_comment,
-                    original_post_content=original_post_content,
-                    chat_id=message.chat.id
-                )
+                # Сохраняем комментарий пользователя в БД и собираем историю в одной сессии
+                conversation_history = None
+                if post_message_id:
+                    try:
+                        from app.infrastructure.db.session import get_async_session
+                        from app.infrastructure.db.repositories import PostCommentRepository
+                        from app.infrastructure.db.models import PostComment
+                        
+                        # Определяем тип контента
+                        content_type = "text"
+                        if message.photo:
+                            content_type = "photo"
+                        elif message.document:
+                            if message.document.file_name and message.document.file_name.lower().endswith('.pdf'):
+                                content_type = "pdf"
+                            else:
+                                content_type = "document"
+                        elif message.voice:
+                            content_type = "voice"
+                        elif message.audio:
+                            content_type = "audio"
+                        elif message.video:
+                            content_type = "video"
+                        elif message.poll:
+                            content_type = "poll"
+                        
+                        # Используем одну сессию для сохранения комментария и сбора истории
+                        async with get_async_session() as session:
+                            try:
+                                # Сначала сохраняем комментарий пользователя
+                                existing = await PostCommentRepository.get_by_message_id(session, message.message_id)
+                                if not existing:
+                                    comment_record = PostComment(
+                                        post_message_id=post_message_id,
+                                        comment_message_id=message.message_id,
+                                        user_id=message.from_user.id,
+                                        is_bot_comment=False,
+                                        content=user_comment,
+                                        content_type=content_type
+                                    )
+                                    await PostCommentRepository.add(session, comment_record)
+                                    # Очищаем кэш сессии, чтобы гарантировать видимость новых данных в следующем запросе
+                                    session.expire_all()
+                                    logger.info(f"✅ Комментарий пользователя сохранен в БД: post_id={post_message_id}, comment_id={message.message_id}, user_id={message.from_user.id}")
+                                else:
+                                    logger.debug(f"Комментарий {message.message_id} уже сохранен в БД")
+                            except Exception as save_comment_error:
+                                logger.error(f"⚠️ Ошибка при сохранении комментария в БД: {save_comment_error}", exc_info=True)
+                                # Продолжаем работу, даже если сохранение не удалось
+                            
+                            # Затем собираем историю (в той же сессии, чтобы видеть только что сохраненный комментарий)
+                            if original_post_content:
+                                try:
+                                    conversation_history = await comment_service.prepare_conversation_history(
+                                        session, post_message_id, original_post_content
+                                    )
+                                    if conversation_history:
+                                        logger.info(f"✅ Подготовлена история комментариев для поста {post_message_id}")
+                                    else:
+                                        logger.debug(f"⚠️ История комментариев не собрана для поста {post_message_id} (возможно, нет комментариев пользователей), используем старый формат")
+                                except Exception as history_error:
+                                    logger.error(f"⚠️ Ошибка при подготовке истории комментариев: {history_error}", exc_info=True)
+                                    # Продолжаем работу без истории, используем старый формат
+                            else:
+                                logger.debug(f"⚠️ original_post_content отсутствует для поста {post_message_id}, используем старый формат")
+                    except Exception as save_error:
+                        logger.error(f"⚠️ Критическая ошибка при работе с БД: {save_error}", exc_info=True)
+                        # Продолжаем работу, даже если сохранение/получение истории не удалось
+                
+                # Генерируем ответ через AI (даже если история не собрана, используем старый формат)
+                try:
+                    reply_text = await comment_service.generate_reply_to_comment(
+                        user_comment=user_comment,
+                        original_post_content=original_post_content,
+                        conversation_history=conversation_history,  # Передаем историю (может быть None)
+                        chat_id=message.chat.id
+                    )
+                except Exception as gen_error:
+                    logger.error(f"⚠️ Ошибка при генерации ответа на комментарий: {gen_error}", exc_info=True)
+                    reply_text = None
                 
                 if reply_text:
                     # Пытаемся отправить ответ с retry механизмом

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import inspect, text
 from app.config.settings import settings
-from app.infrastructure.db.models import Base, UserStatus, Admin
+from app.infrastructure.db.models import Base, UserStatus, Admin, PostComment  # Импортируем все модели для создания таблиц
 
 DATABASE_URL = settings.DB_URL
 

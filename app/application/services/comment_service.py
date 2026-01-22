@@ -6,12 +6,14 @@
 import logging
 from typing import Optional, Dict, List
 from openai import OpenAI
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
 # Ограничения для работы на ограниченных ресурсах (768 MB RAM)
 MAX_CONVERSATION_HISTORY_CHATS = 10  # Максимум чатов с историей
 MAX_MESSAGES_PER_CHAT = 3  # Максимум сообщений в истории на чат (уменьшено с 5)
+MAX_COMMENTS_IN_HISTORY = 15  # Максимум комментариев в истории для отправки в ИИ
 
 # Системный промпт для генерации комментариев
 COMMENT_SYSTEM_PROMPT = (
@@ -59,6 +61,9 @@ REPLY_SYSTEM_PROMPT = (
     "Вы бот-администратор в телеграм-канале 'Безопасность всегда'. "
     "Канал посвящен безопасности: 'Безопасность — это не случайность, а система.' "
     "Вы отвечаете на комментарии подписчиков к постам в канале на русском языке.\n\n"
+    
+    "ВАЖНО: Вам будет предоставлена полная история обсуждения поста, включая все комментарии пользователей. "
+    "Вы должны ОТВЕЧАТЬ ТОЛЬКО НА ПОСЛЕДНИЙ комментарий в истории, но учитывать весь контекст предыдущих комментариев для более полного и релевантного ответа.\n\n"
     
     "Принципы ответа на комментарии:\n\n"
     
@@ -179,25 +184,131 @@ class CommentService:
             logger.error(f"Ошибка при генерации комментария к посту: {e}")
             return None
 
+    async def prepare_conversation_history(
+        self,
+        session: AsyncSession,
+        post_message_id: int,
+        original_post_content: str
+    ) -> Optional[str]:
+        """
+        Подготавливает полную историю комментариев к посту для отправки в ИИ.
+        
+        Формат:
+        1. В телеграм канале Безопасность всегда был опубликован пост - [текст поста]
+        2. Бот прокомментировал этот пост - [текст первого комментария бота]
+        3. Пользователь [id] ответил [тип контента], содержащим следующую информацию - [контент]
+        4. ... (и так далее для каждого комментария)
+        
+        :param session: Сессия БД
+        :param post_message_id: ID поста в канале
+        :param original_post_content: Полный контент оригинального поста
+        :return: Сформированная история комментариев или None при ошибке
+        """
+        try:
+            from app.infrastructure.db.repositories import PostCommentRepository
+            from app.infrastructure.db.models import PostComment
+            
+            # Получаем все комментарии к посту (последние MAX_COMMENTS_IN_HISTORY)
+            comments = await PostCommentRepository.get_by_post_message_id(
+                session, post_message_id, limit=MAX_COMMENTS_IN_HISTORY
+            )
+            
+            if not comments:
+                logger.warning(f"Не найдено комментариев для поста {post_message_id}")
+                return None
+            
+            # Начинаем формировать историю
+            history_parts = [
+                f"1. В телеграм канале Безопасность всегда был опубликован пост - {original_post_content}"
+            ]
+            
+            # Находим первый комментарий бота
+            bot_comment = await PostCommentRepository.get_bot_comment_by_post(session, post_message_id)
+            if bot_comment:
+                history_parts.append(f"2. Бот прокомментировал этот пост - {bot_comment.content}")
+                comment_number = 3
+            else:
+                comment_number = 2
+            
+            # Добавляем комментарии пользователей
+            user_comments = [c for c in comments if not c.is_bot_comment]  # Только комментарии пользователей
+            
+            # Если нет комментариев пользователей, возвращаем None (будет использован старый формат)
+            if not user_comments:
+                logger.debug(f"Нет комментариев пользователей для поста {post_message_id}, используем старый формат")
+                return None
+            
+            for idx, comment in enumerate(user_comments):
+                # Определяем тип контента
+                content_type_desc = comment.content_type or "текстом"
+                if content_type_desc == "photo":
+                    content_type_desc = "фото с подписью"
+                elif content_type_desc == "document":
+                    content_type_desc = "документом"
+                elif content_type_desc == "pdf":
+                    content_type_desc = "PDF документом"
+                elif content_type_desc in ["voice", "audio"]:
+                    content_type_desc = "звуковым файлом"
+                else:
+                    content_type_desc = "текстом"
+                
+                user_id_str = str(comment.user_id) if comment.user_id else "неизвестный пользователь"
+                
+                # Последний комментарий помечаем специально
+                is_last = (idx == len(user_comments) - 1)
+                if is_last:
+                    history_parts.append(
+                        f"{comment_number}. [ПОСЛЕДНИЙ КОММЕНТАРИЙ - ОТВЕТЬТЕ НА ЭТОТ] Пользователь {user_id_str} ответил {content_type_desc}, "
+                        f"содержащим следующую информацию - {comment.content}"
+                    )
+                else:
+                    history_parts.append(
+                        f"{comment_number}. Пользователь {user_id_str} ответил {content_type_desc}, "
+                        f"содержащим следующую информацию - {comment.content}"
+                    )
+                comment_number += 1
+            
+            # Добавляем финальную инструкцию
+            if user_comments:
+                history_parts.append(
+                    "\nВАЖНО: Вы должны ответить ТОЛЬКО на последний комментарий (помечен как '[ПОСЛЕДНИЙ КОММЕНТАРИЙ - ОТВЕТЬТЕ НА ЭТОТ]'), "
+                    "но учитывайте весь контекст предыдущих комментариев для более полного и релевантного ответа."
+                )
+            
+            result = "\n\n".join(history_parts)
+            logger.info(f"Подготовлена история комментариев для поста {post_message_id}: {len(comments)} комментариев, из них {len(user_comments)} от пользователей")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка при подготовке истории комментариев: {e}", exc_info=True)
+            return None
+
     async def generate_reply_to_comment(
         self,
         user_comment: str,
         original_post_content: Optional[str] = None,
+        conversation_history: Optional[str] = None,
         chat_id: Optional[int] = None
     ) -> Optional[str]:
         """
         Генерирует ответ на комментарий пользователя.
 
         :param user_comment: Комментарий пользователя
-        :param original_post_content: Содержимое оригинального поста (для контекста)
+        :param original_post_content: Содержимое оригинального поста (для контекста, используется если нет conversation_history)
+        :param conversation_history: Полная история комментариев к посту (приоритет над user_comment и original_post_content)
         :param chat_id: ID чата для истории разговора (опционально)
         :return: Сгенерированный ответ или None при ошибке
         """
         try:
             # Формируем контекст для ответа
-            user_message = user_comment
-            if original_post_content:
-                user_message = f"Пост: {original_post_content}\n\nКомментарий пользователя: {user_comment}"
+            if conversation_history:
+                # Используем полную историю комментариев
+                user_message = conversation_history
+            else:
+                # Используем старый формат (для обратной совместимости)
+                user_message = user_comment
+                if original_post_content:
+                    user_message = f"Пост: {original_post_content}\n\nКомментарий пользователя: {user_comment}"
 
             messages = [
                 {"role": "system", "content": REPLY_SYSTEM_PROMPT},

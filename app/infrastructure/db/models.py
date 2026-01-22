@@ -101,3 +101,15 @@ class AiUsage(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Пользователь (если применимо)
     success = Column(Boolean, default=True)  # Успешность запроса
     error_message = Column(Text, nullable=True)  # Сообщение об ошибке (если была)
+
+class PostComment(Base):
+    """Модель для хранения комментариев к постам в канале."""
+    __tablename__ = "post_comments"
+    id = Column(Integer, primary_key=True)
+    post_message_id = Column(Integer, nullable=False, index=True)  # ID поста в канале (для связи)
+    comment_message_id = Column(Integer, nullable=False, unique=True, index=True)  # ID комментария в группе обсуждений
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # ID пользователя (None если от бота)
+    is_bot_comment = Column(Boolean, default=False, nullable=False)  # Флаг: комментарий от бота или пользователя
+    content = Column(Text, nullable=False)  # Полный обработанный контент (текст + медиа)
+    content_type = Column(String(50), nullable=True)  # Тип контента: text, photo, document, voice, audio, etc.
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False, index=True)  # Время создания

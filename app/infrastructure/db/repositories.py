@@ -4,7 +4,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import Optional, List
-from .models import User, Ban, Warn, BlacklistItem, Log, UserStatus, Admin
+from .models import User, Ban, Warn, BlacklistItem, Log, UserStatus, Admin, PostComment
 from sqlalchemy import delete, update, func
 import datetime
 
@@ -308,3 +308,80 @@ class AdminRepository:
             await session.commit()
             return result.rowcount > 0
         return False
+
+class PostCommentRepository:
+    """Репозиторий для работы с комментариями к постам."""
+    
+    @staticmethod
+    async def add(session: AsyncSession, comment: PostComment) -> PostComment:
+        """Добавить комментарий в БД."""
+        session.add(comment)
+        await session.commit()
+        await session.refresh(comment)
+        return comment
+    
+    @staticmethod
+    async def get_by_message_id(session: AsyncSession, comment_message_id: int) -> Optional[PostComment]:
+        """Получить комментарий по ID сообщения."""
+        q = await session.execute(
+            select(PostComment).where(PostComment.comment_message_id == comment_message_id)
+        )
+        return q.scalar_one_or_none()
+    
+    @staticmethod
+    async def get_by_post_message_id(
+        session: AsyncSession, 
+        post_message_id: int, 
+        limit: int = 15
+    ) -> List[PostComment]:
+        """Получить все комментарии к посту (последние N комментариев)."""
+        # Получаем последние N комментариев (сортируем по убыванию даты)
+        q = await session.execute(
+            select(PostComment)
+            .where(PostComment.post_message_id == post_message_id)
+            .order_by(PostComment.created_at.desc())
+            .limit(limit)
+        )
+        comments = q.scalars().all()
+        # Возвращаем в хронологическом порядке (от старых к новым)
+        return list(reversed(comments))
+    
+    @staticmethod
+    async def get_bot_comment_by_post(
+        session: AsyncSession, 
+        post_message_id: int
+    ) -> Optional[PostComment]:
+        """Получить первый комментарий бота к посту."""
+        q = await session.execute(
+            select(PostComment)
+            .where(PostComment.post_message_id == post_message_id)
+            .where(PostComment.is_bot_comment == True)
+            .order_by(PostComment.created_at.asc())
+            .limit(1)
+        )
+        return q.scalar_one_or_none()
+    
+    @staticmethod
+    async def delete_old_comments(session: AsyncSession, days: int = 30) -> int:
+        """
+        Удаляет комментарии старше указанного количества дней.
+        
+        :param session: Сессия БД
+        :param days: Количество дней (по умолчанию 30)
+        :return: Количество удаленных комментариев
+        """
+        cutoff_date = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        result = await session.execute(
+            delete(PostComment).where(PostComment.created_at < cutoff_date)
+        )
+        await session.commit()
+        return result.rowcount
+    
+    @staticmethod
+    async def count_by_post(session: AsyncSession, post_message_id: int) -> int:
+        """Подсчитать количество комментариев к посту."""
+        q = await session.execute(
+            select(func.count(PostComment.id))
+            .where(PostComment.post_message_id == post_message_id)
+        )
+        return q.scalar() or 0
