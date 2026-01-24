@@ -452,6 +452,7 @@ async def discussion_message_handler(message: types.Message, bot: Bot):
     # Проверяем медиа-контент ДО генерации ответа, чтобы не тратить ресурсы на AI если есть нарушение
     # ВАЖНО: Проверка выполняется для ВСЕХ сообщений, не только для ответов
     ai_clients = get_ai_clients()
+    full_content = None  # Сохраняем для дальнейшего использования
     if ai_clients and ai_clients.openai:
         try:
             # Подготавливаем полный контент для проверки
@@ -624,8 +625,8 @@ async def discussion_message_handler(message: types.Message, bot: Bot):
                     return  # Сообщение удалено, прерываем обработку
     
     # 3. AI-ответ на комментарий пользователя
-    # ВАЖНО: Проверка blacklist для всех медиа уже выполнена выше (строка 411)
-    # Здесь только подготавливаем контент и генерируем ответ
+    # ВАЖНО: Проверка blacklist для всех медиа уже выполнена выше
+    # ИСПРАВЛЕНО: Используем уже подготовленный full_content, если он есть
     if message.reply_to_message and message.from_user:
         comment_service = get_comment_service()
         if comment_service:
@@ -640,24 +641,24 @@ async def discussion_message_handler(message: types.Message, bot: Bot):
                     if not user_comment:
                         return  # Пропускаем сообщения без текста
                 else:
-                    # Обрабатываем комментарий через prepare_message_content
-                    # ВАЖНО: Это повторный вызов, но он нужен для генерации ответа
-                    # Можно оптимизировать, сохранив full_content из проверки выше, но для простоты оставим так
-                    try:
-                        user_comment_full = await prepare_message_content(
-                            bot, message, ai_clients.openai
-                        )
-                        logger.info(f"Полный контент комментария пользователя для генерации ответа: {user_comment_full[:200]}...")
-                        
-                        # УДАЛЕНО: Все проверки blacklist (уже выполнены выше, строка 411)
-                        # Используем полный контент для формирования ответа
-                        user_comment = user_comment_full
-                    except Exception as e:
-                        logger.error(f"Ошибка при обработке контента комментария пользователя: {e}", exc_info=True)
-                        # Используем базовый текст, если обработка не удалась
-                        user_comment = message.text or message.caption or ""
-                        if not user_comment:
-                            return  # Пропускаем сообщения без текста
+                    # ИСПРАВЛЕНО: Используем уже подготовленный контент, если он есть
+                    if full_content:
+                        logger.info(f"✅ Используем уже подготовленный контент для генерации ответа (из проверки blacklist)")
+                        user_comment = full_content
+                    else:
+                        # Если full_content не был подготовлен (например, ошибка выше), подготавливаем заново
+                        logger.warning("⚠️ full_content не был подготовлен ранее, подготавливаем заново")
+                        try:
+                            user_comment = await prepare_message_content(
+                                bot, message, ai_clients.openai
+                            )
+                            logger.info(f"Полный контент комментария пользователя для генерации ответа: {user_comment[:200]}...")
+                        except Exception as e:
+                            logger.error(f"Ошибка при обработке контента комментария пользователя: {e}", exc_info=True)
+                            # Используем базовый текст, если обработка не удалась
+                            user_comment = message.text or message.caption or ""
+                            if not user_comment:
+                                return  # Пропускаем сообщения без текста
                 
                 # Находим оригинальный пост (идем по цепочке reply_to_message)
                 original_post = None

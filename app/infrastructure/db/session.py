@@ -2,11 +2,15 @@
 Async SQLAlchemy engine/session setup for Telegram bot (using SQLite).
 Include table init util.
 """
+import logging
 from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import inspect, text
 from app.config.settings import settings
 from app.infrastructure.db.models import Base, UserStatus, Admin, PostComment  # Импортируем все модели для создания таблиц
+from app.common.error_handler import handle_sync_error, ErrorContext, ErrorSeverity
+
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = settings.DB_URL
 
@@ -37,7 +41,7 @@ async def async_init_db():
         # Проверяем и добавляем отсутствующие колонки
         await _migrate_users_table(conn)
     
-    print("[DB INIT] Все нужные таблицы созданы (если отсутствовали).")
+    logger.info("[DB INIT] Все нужные таблицы созданы (если отсутствовали).")
 
 async def _migrate_users_table(conn):
     """
@@ -54,30 +58,34 @@ async def _migrate_users_table(conn):
             
             # Добавляем колонку status, если её нет
             if 'status' not in columns:
-                print("[DB MIGRATION] Добавляем колонку 'status' в таблицу 'users'...")
+                logger.info("[DB MIGRATION] Добавляем колонку 'status' в таблицу 'users'...")
                 sync_conn.execute(text(
                     "ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active'"
                 ))
                 sync_conn.execute(text(
                     "UPDATE users SET status = 'active' WHERE status IS NULL"
                 ))
-                print("[DB MIGRATION] Колонка 'status' успешно добавлена.")
+                logger.info("[DB MIGRATION] Колонка 'status' успешно добавлена.")
             
             # Добавляем колонку warn_count, если её нет
             if 'warn_count' not in columns:
-                print("[DB MIGRATION] Добавляем колонку 'warn_count' в таблицу 'users'...")
+                logger.info("[DB MIGRATION] Добавляем колонку 'warn_count' в таблицу 'users'...")
                 sync_conn.execute(text(
                     "ALTER TABLE users ADD COLUMN warn_count INTEGER DEFAULT 0"
                 ))
                 sync_conn.execute(text(
                     "UPDATE users SET warn_count = 0 WHERE warn_count IS NULL"
                 ))
-                print("[DB MIGRATION] Колонка 'warn_count' успешно добавлена.")
+                logger.info("[DB MIGRATION] Колонка 'warn_count' успешно добавлена.")
                 
         except Exception as e:
-            print(f"[DB MIGRATION] Ошибка при миграции: {e}")
-            import traceback
-            traceback.print_exc()
+            handle_sync_error(
+                error=e,
+                context=ErrorContext(
+                    operation="migrate_users_table",
+                    severity=ErrorSeverity.MEDIUM
+                )
+            )
             # Не прерываем работу, если миграция не удалась
     
     await conn.run_sync(check_and_add_columns)

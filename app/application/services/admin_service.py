@@ -1,12 +1,16 @@
 """
 Admin service: управление администраторами, проверка прав доступа
 """
+import logging
 from app.infrastructure.db.session import get_async_session
 from app.infrastructure.db.repositories import AdminRepository, UserRepository, LogRepository
 from app.infrastructure.db.models import Log, Admin
 from typing import Optional, List
 from sqlalchemy import update
 from app.config.settings import settings
+from app.common.error_handler import handle_error, ErrorContext, ErrorSeverity
+
+logger = logging.getLogger(__name__)
 
 # Иерархия ролей
 ROLE_HIERARCHY = {
@@ -180,7 +184,14 @@ async def add_admin(
                 message=f"Пользователь @{admin.username or user_id} добавлен как администратор (роль: {role}) пользователем @{performer_name}"
             ))
         except Exception as e:
-            print(f"Ошибка при логировании добавления админа: {e}")
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="add_admin.logging",
+                    user_id=user_id,
+                    severity=ErrorSeverity.LOW
+                )
+            )
         
         username_display = f"@{admin.username}" if admin.username else str(user_id)
         return True, f"👤 Пользователь {username_display} добавлен как администратор (роль: {role})"
@@ -212,7 +223,14 @@ async def remove_admin(user_id: int, removed_by: int) -> tuple[bool, str]:
                 message=f"Администратор @{admin.username or user_id} удален пользователем @{performer_name}"
             ))
         except Exception as e:
-            print(f"Ошибка при логировании удаления админа: {e}")
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="remove_admin.logging",
+                    user_id=user_id,
+                    severity=ErrorSeverity.LOW
+                )
+            )
         
         username_display = f"@{admin.username}" if admin.username else str(user_id)
         return True, f"✅ Администратор {username_display} удален"
@@ -244,7 +262,14 @@ async def change_admin_role(user_id: int, new_role: str, changed_by: int) -> tup
                 message=f"Роль администратора @{admin.username or user_id} изменена с {old_role} на {new_role} пользователем @{performer_name}"
             ))
         except Exception as e:
-            print(f"Ошибка при логировании изменения роли: {e}")
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="change_admin_role.logging",
+                    user_id=user_id,
+                    severity=ErrorSeverity.LOW
+                )
+            )
         
         username_display = f"@{admin.username}" if admin.username else str(user_id)
         return True, f"✅ Роль администратора {username_display} изменена с {old_role} на {new_role}"

@@ -2,6 +2,7 @@
 Entry point for the Telegram bot project.
 """
 import asyncio
+import logging
 from aiogram import Bot, Dispatcher
 from app.config.settings import settings
 from app.presentation.routers.user_router import user_router
@@ -13,6 +14,12 @@ from app.application.services.user_service import unban_expired_users, register_
 from app.infrastructure.ai_clients import init_ai_clients
 from app.application.services.comment_service import CommentService
 from app.application.services import set_comment_service, set_ai_clients
+from app.common.logger import setup_logging
+from app.common.error_handler import handle_error, ErrorContext, ErrorSeverity
+
+# Настраиваем логирование
+setup_logging(level="INFO")
+logger = logging.getLogger(__name__)
 
 async def check_expired_bans_periodically():
     """Фоновая задача для периодической проверки и снятия истекших банов"""
@@ -22,14 +29,18 @@ async def check_expired_bans_periodically():
             await asyncio.sleep(3600)  # 1 час = 3600 секунд
             unban_count = await unban_expired_users()
             if unban_count > 0:
-                print(f"✅ Автоматически снято банов: {unban_count}")
+                logger.info(f"✅ Автоматически снято банов: {unban_count}")
         except asyncio.CancelledError:
             # Задача была отменена - это нормально при остановке бота
             break
         except Exception as e:
-            print(f"⚠️ Ошибка при проверке истекших банов: {e}")
-            import traceback
-            traceback.print_exc()
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="check_expired_bans_periodically",
+                    severity=ErrorSeverity.MEDIUM
+                )
+            )
             # Ждем перед следующей попыткой даже при ошибке
             await asyncio.sleep(60)  # 1 минута при ошибке
 
@@ -47,19 +58,23 @@ async def cleanup_old_logs_periodically():
                 # Если логов больше 10000, оставляем только последние 10000
                 if logs_count > 10000:
                     deleted_count = await LogRepository.keep_recent_logs(session, max_logs=10000)
-                    print(f"🧹 Очищено старых логов: {deleted_count} (осталось 10000)")
+                    logger.info(f"🧹 Очищено старых логов: {deleted_count} (осталось 10000)")
                 else:
                     # Иначе удаляем логи старше 30 дней
                     deleted_count = await LogRepository.delete_old_logs(session, days=30)
                     if deleted_count > 0:
-                        print(f"🧹 Удалено логов старше 30 дней: {deleted_count}")
+                        logger.info(f"🧹 Удалено логов старше 30 дней: {deleted_count}")
         except asyncio.CancelledError:
             # Задача была отменена - это нормально при остановке бота
             break
         except Exception as e:
-            print(f"⚠️ Ошибка при очистке старых логов: {e}")
-            import traceback
-            traceback.print_exc()
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="cleanup_old_logs_periodically",
+                    severity=ErrorSeverity.MEDIUM
+                )
+            )
             # Ждем перед следующей попыткой даже при ошибке
             await asyncio.sleep(3600)  # 1 час при ошибке
 
@@ -73,14 +88,18 @@ async def cleanup_old_comments_periodically():
             async with get_async_session() as session:
                 deleted_count = await PostCommentRepository.delete_old_comments(session, days=30)
                 if deleted_count > 0:
-                    print(f"🧹 Удалено комментариев старше 30 дней: {deleted_count}")
+                    logger.info(f"🧹 Удалено комментариев старше 30 дней: {deleted_count}")
         except asyncio.CancelledError:
             # Задача была отменена - это нормально при остановке бота
             break
         except Exception as e:
-            print(f"⚠️ Ошибка при очистке старых комментариев: {e}")
-            import traceback
-            traceback.print_exc()
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="cleanup_old_comments_periodically",
+                    severity=ErrorSeverity.MEDIUM
+                )
+            )
             # Ждем перед следующей попыткой даже при ошибке
             await asyncio.sleep(3600)  # 1 час при ошибке
 
@@ -97,7 +116,7 @@ async def initialize_admins():
         
         if not existing_admins and settings.ADMIN_IDS:
             admin_ids = settings.ADMIN_IDS.split(",")
-            print(f"[ADMIN INIT] Начальная инициализация администраторов из .env...")
+            logger.info("[ADMIN INIT] Начальная инициализация администраторов из .env...")
             
             # Получаем список валидных admin_id
             valid_admin_ids = []
@@ -107,7 +126,7 @@ async def initialize_admins():
                     if admin_id > 0:
                         valid_admin_ids.append(admin_id)
                 except ValueError:
-                    print(f"[ADMIN INIT] Пропущен неверный admin_id: {admin_id_str}")
+                    logger.warning(f"[ADMIN INIT] Пропущен неверный admin_id: {admin_id_str}")
             
             for idx, admin_id in enumerate(valid_admin_ids):
                 try:
@@ -126,7 +145,14 @@ async def initialize_admins():
                     try:
                         await register_user(user_id=admin_id, username=None, full_name=None)
                     except Exception as e:
-                        print(f"[ADMIN INIT] Ошибка при регистрации пользователя {admin_id}: {e}")
+                        await handle_error(
+                            error=e,
+                            context=ErrorContext(
+                                operation="initialize_admins.register_user",
+                                user_id=admin_id,
+                                severity=ErrorSeverity.LOW
+                            )
+                        )
                     
                     # Добавляем администратора
                     try:
@@ -139,13 +165,27 @@ async def initialize_admins():
                             added_by=None  # Первичная инициализация
                         )
                         role_display = "👑 owner" if role == "owner" else "🟢 moderator"
-                        print(f"[ADMIN INIT] ✅ Администратор {admin_id} добавлен (роль: {role_display})")
+                        logger.info(f"[ADMIN INIT] ✅ Администратор {admin_id} добавлен (роль: {role_display})")
                     except Exception as e:
-                        print(f"[ADMIN INIT] Ошибка при добавлении администратора {admin_id}: {e}")
+                        await handle_error(
+                            error=e,
+                            context=ErrorContext(
+                                operation="initialize_admins.add_admin",
+                                user_id=admin_id,
+                                severity=ErrorSeverity.MEDIUM
+                            )
+                        )
                 except Exception as e:
-                    print(f"[ADMIN INIT] Ошибка при инициализации админа {admin_id}: {e}")
+                    await handle_error(
+                        error=e,
+                        context=ErrorContext(
+                            operation="initialize_admins",
+                            user_id=admin_id,
+                            severity=ErrorSeverity.MEDIUM
+                        )
+                    )
             
-            print(f"[ADMIN INIT] Инициализация администраторов завершена.")
+            logger.info("[ADMIN INIT] Инициализация администраторов завершена.")
 
 async def main():
     # Инициализируем БД при старте
@@ -160,10 +200,16 @@ async def main():
         set_ai_clients(ai_clients)  # Сохраняем глобально
         comment_service = CommentService(ai_clients.openai)
         set_comment_service(comment_service)  # Сохраняем глобально
-        print("✅ AI клиенты и сервис комментариев инициализированы")
+        logger.info("✅ AI клиенты и сервис комментариев инициализированы")
     except Exception as e:
-        print(f"⚠️ Ошибка при инициализации AI клиентов: {e}")
-        print("⚠️ Бот будет работать без AI функций (комментирование постов будет отключено)")
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="main.init_ai_clients",
+                severity=ErrorSeverity.HIGH
+            )
+        )
+        logger.warning("⚠️ Бот будет работать без AI функций (комментирование постов будет отключено)")
         comment_service = None
     
     bot = Bot(token=settings.BOT_TOKEN)
@@ -175,36 +221,43 @@ async def main():
     dp.include_router(channel_router)  # Обработка сообщений из канала (в последнюю очередь)
 
     # Надежно удаляем вебхук (если был установлен), чтобы использовать polling
-    print("🔄 Проверяем статус вебхука...")
+    logger.info("🔄 Проверяем статус вебхука...")
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
             webhook_info = await bot.get_webhook_info()
             if webhook_info.url:
-                print(f"⚠️  Обнаружен вебхук: {webhook_info.url} (попытка {attempt + 1}/{max_attempts})")
+                logger.warning(f"⚠️  Обнаружен вебхук: {webhook_info.url} (попытка {attempt + 1}/{max_attempts})")
                 await bot.delete_webhook(drop_pending_updates=True)
                 # Ждем, чтобы Telegram успел обработать удаление
                 await asyncio.sleep(2)
                 # Проверяем, что вебхук действительно удален
                 webhook_info_after = await bot.get_webhook_info()
                 if not webhook_info_after.url:
-                    print("✅ Вебхук успешно удален")
+                    logger.info("✅ Вебхук успешно удален")
                     break
                 else:
-                    print(f"⚠️  Вебхук все еще активен, повторная попытка...")
+                    logger.warning(f"⚠️  Вебхук все еще активен, повторная попытка...")
                     if attempt == max_attempts - 1:
-                        print("❌ Не удалось удалить вебхук после нескольких попыток")
+                        logger.error("❌ Не удалось удалить вебхук после нескольких попыток")
             else:
-                print("✅ Вебхук не установлен, используем polling")
+                logger.info("✅ Вебхук не установлен, используем polling")
                 break
         except Exception as e:
-            print(f"⚠️  Ошибка при проверке/удалении вебхука (попытка {attempt + 1}): {e}")
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="main.check_webhook",
+                    additional_data={"attempt": attempt + 1, "max_attempts": max_attempts},
+                    severity=ErrorSeverity.MEDIUM
+                )
+            )
             if attempt < max_attempts - 1:
                 await asyncio.sleep(2)
             else:
-                print("⚠️  Продолжаем запуск несмотря на ошибки...")
+                logger.warning("⚠️  Продолжаем запуск несмотря на ошибки...")
 
-    print("Bot initialized. Ready to start polling.")
+    logger.info("Bot initialized. Ready to start polling.")
     
     # Даем время для завершения всех операций с вебхуком
     await asyncio.sleep(1)
@@ -215,24 +268,28 @@ async def main():
     comments_cleanup_task = None
     try:
         ban_check_task = asyncio.create_task(check_expired_bans_periodically())
-        print("✅ Запущена фоновая задача для проверки истекших банов (каждый час)")
+        logger.info("✅ Запущена фоновая задача для проверки истекших банов (каждый час)")
         
         logs_cleanup_task = asyncio.create_task(cleanup_old_logs_periodically())
-        print("✅ Запущена фоновая задача для очистки старых логов (каждые 24 часа)")
+        logger.info("✅ Запущена фоновая задача для очистки старых логов (каждые 24 часа)")
         
         comments_cleanup_task = asyncio.create_task(cleanup_old_comments_periodically())
-        print("✅ Запущена фоновая задача для очистки старых комментариев (каждые 24 часа)")
+        logger.info("✅ Запущена фоновая задача для очистки старых комментариев (каждые 24 часа)")
         
         await dp.start_polling(bot, drop_pending_updates=True)
     except KeyboardInterrupt:
-        print("\n⚠️  Получен сигнал остановки (Ctrl+C)...")
+        logger.info("\n⚠️  Получен сигнал остановки (Ctrl+C)...")
     except asyncio.CancelledError:
         # Нормальная ситуация при остановке
-        print("\n⚠️  Получен сигнал остановки...")
+        logger.info("\n⚠️  Получен сигнал остановки...")
     except Exception as e:
-        print(f"❌ Критическая ошибка при запуске polling: {e}")
-        import traceback
-        traceback.print_exc()
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="main.start_polling",
+                severity=ErrorSeverity.CRITICAL
+            )
+        )
     finally:
         # Отменяем фоновые задачи
         if ban_check_task:
@@ -242,9 +299,15 @@ async def main():
                     await ban_check_task
                 except asyncio.CancelledError:
                     pass  # Нормально - задача отменена
-                print("✅ Фоновая задача проверки банов остановлена")
+                logger.info("✅ Фоновая задача проверки банов остановлена")
             except Exception as e:
-                print(f"⚠️ Ошибка при остановке фоновой задачи проверки банов: {e}")
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="main.stop_ban_check_task",
+                        severity=ErrorSeverity.LOW
+                    )
+                )
         
         if logs_cleanup_task:
             try:
@@ -253,9 +316,15 @@ async def main():
                     await logs_cleanup_task
                 except asyncio.CancelledError:
                     pass  # Нормально - задача отменена
-                print("✅ Фоновая задача очистки логов остановлена")
+                logger.info("✅ Фоновая задача очистки логов остановлена")
             except Exception as e:
-                print(f"⚠️ Ошибка при остановке фоновой задачи очистки логов: {e}")
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="main.stop_logs_cleanup_task",
+                        severity=ErrorSeverity.LOW
+                    )
+                )
         
         if comments_cleanup_task:
             try:
@@ -264,16 +333,28 @@ async def main():
                     await comments_cleanup_task
                 except asyncio.CancelledError:
                     pass  # Нормально - задача отменена
-                print("✅ Фоновая задача очистки комментариев остановлена")
+                logger.info("✅ Фоновая задача очистки комментариев остановлена")
             except Exception as e:
-                print(f"⚠️ Ошибка при остановке фоновой задачи очистки комментариев: {e}")
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="main.stop_comments_cleanup_task",
+                        severity=ErrorSeverity.LOW
+                    )
+                )
         
         # Корректно закрываем сессию бота
         try:
             await bot.session.close()
-            print("✅ Сессия бота закрыта")
-        except Exception:
-            pass
+            logger.info("✅ Сессия бота закрыта")
+        except Exception as e:
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="main.close_bot_session",
+                    severity=ErrorSeverity.LOW
+                )
+            )
 
 if __name__ == "__main__":
     asyncio.run(main())

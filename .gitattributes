@@ -1,0 +1,26 @@
+# Унифицируем окончания строк для всех файлов
+* text=auto
+
+# Python файлы - всегда LF в репозитории, CRLF в рабочей копии на Windows
+*.py text eol=lf
+
+# Конфигурационные файлы
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.env text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+
+# Бинарные файлы
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.xlsx binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary

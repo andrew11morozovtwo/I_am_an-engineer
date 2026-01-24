@@ -2,12 +2,16 @@
 Админ-команды: /ban, /warn, /blacklist, /stats, /addadmin, /removeadmin, /admins, /myadmin, /setrole
 Админ-панель: /admin - интерактивная панель управления
 """
+import logging
 from aiogram import Router, types, Bot
 from aiogram.filters import Command
 from aiogram.filters.command import CommandObject
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters.callback_data import CallbackData
 from app.config.settings import settings
+from app.common.error_handler import handle_error, ErrorContext, ErrorSeverity
+
+logger = logging.getLogger(__name__)
 from app.application.services.user_service import (
     ban_user, add_warn, get_user_by_id, get_user_warns_count, get_user_ban, register_user
 )
@@ -194,7 +198,14 @@ async def ban_command_handler(message: types.Message, command: CommandObject, bo
                 )
             await bot.send_message(chat_id=target_user_id, text=ban_notification, parse_mode="HTML")
         except Exception as e:
-            print(f"Ошибка при отправке уведомления о бане пользователю {target_user_id}: {e}")
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="ban_command.send_notification",
+                    user_id=target_user_id,
+                    severity=ErrorSeverity.LOW
+                )
+            )
         
         # Пытаемся удалить сообщения пользователя из группы обсуждений (если есть)
         if message.chat.type in ("group", "supergroup"):
@@ -202,7 +213,14 @@ async def ban_command_handler(message: types.Message, command: CommandObject, bo
                 # Можно добавить логику удаления всех сообщений пользователя
                 pass
             except Exception as e:
-                print(f"Ошибка при удалении сообщений: {e}")
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="ban_command.delete_messages",
+                        user_id=target_user_id,
+                        severity=ErrorSeverity.LOW
+                    )
+                )
         
     except ValueError:
         await message.answer("❌ Неверный формат user_id. Должно быть число.")
@@ -258,7 +276,14 @@ async def warn_command_handler(message: types.Message, command: CommandObject, b
                 )
                 await bot.send_message(chat_id=target_user_id, text=ban_notification, parse_mode="HTML")
             except Exception as e:
-                print(f"Ошибка при отправке уведомления о бане пользователю {target_user_id}: {e}")
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="warn_command.send_ban_notification",
+                        user_id=target_user_id,
+                        severity=ErrorSeverity.LOW
+                    )
+                )
         else:
             await message.answer(admin_notification)
             
@@ -272,7 +297,14 @@ async def warn_command_handler(message: types.Message, command: CommandObject, b
                 )
                 await bot.send_message(chat_id=target_user_id, text=warn_notification, parse_mode="HTML")
             except Exception as e:
-                print(f"Ошибка при отправке уведомления о предупреждении пользователю {target_user_id}: {e}")
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="warn_command.send_warn_notification",
+                        user_id=target_user_id,
+                        severity=ErrorSeverity.LOW
+                    )
+                )
         
     except ValueError:
         await message.answer("❌ Неверный формат user_id. Должно быть число.")
@@ -367,9 +399,27 @@ async def stats_command_handler(message: types.Message):
         text += f"🚫 Размер черного списка: {stats['blacklist_size']}\n\n"
         text += "📝 Последние 5 действий:\n"
         
+        # Максимальная длина сообщения Telegram - 4096 символов
+        # Оставляем запас для заголовка и форматирования
+        MAX_MESSAGE_LENGTH = 4000
+        MAX_LOG_MESSAGE_LENGTH = 60  # Максимальная длина сообщения лога
+        
         for log in stats['recent_logs']:
             log_time = log.created_at.strftime("%d.%m.%Y %H:%M")
-            text += f"• {log_time} | {log.event_type} | {log.message or 'без сообщения'}\n"
+            log_message = log.message or 'без сообщения'
+            
+            # Обрезаем длинное сообщение лога
+            if len(log_message) > MAX_LOG_MESSAGE_LENGTH:
+                log_message = log_message[:MAX_LOG_MESSAGE_LENGTH] + "..."
+            
+            log_line = f"• {log_time} | {log.event_type} | {log_message}\n"
+            
+            # Проверяем, не превышает ли общая длина сообщения лимит
+            if len(text) + len(log_line) > MAX_MESSAGE_LENGTH:
+                text += "\n... (остальные логи обрезаны из-за ограничения длины сообщения)"
+                break
+            
+            text += log_line
         
         await message.answer(text)
     
@@ -450,7 +500,14 @@ async def add_admin_handler(message: types.Message, command: CommandObject, bot:
                 full_name=None
             )
         except Exception as e:
-            print(f"Ошибка при регистрации пользователя: {e}")
+            await handle_error(
+                error=e,
+                context=ErrorContext(
+                    operation="add_admin.register_user",
+                    user_id=target_user_id,
+                    severity=ErrorSeverity.LOW
+                )
+            )
         
         # Получаем информацию о пользователе
         user = await get_user_by_id(target_user_id)
@@ -486,7 +543,14 @@ async def add_admin_handler(message: types.Message, command: CommandObject, bot:
                 )
                 await bot.send_message(chat_id=target_user_id, text=notification)
             except Exception as e:
-                print(f"Ошибка при отправке уведомления новому админу: {e}")
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="add_admin.send_notification",
+                        user_id=target_user_id,
+                        severity=ErrorSeverity.LOW
+                    )
+                )
         else:
             await message.answer(result_message)
     
@@ -494,8 +558,14 @@ async def add_admin_handler(message: types.Message, command: CommandObject, bot:
         await message.answer("❌ Неверный формат user_id. Должно быть число.")
     except Exception as e:
         await message.answer(f"❌ Ошибка при выполнении команды: {e}")
-        import traceback
-        traceback.print_exc()
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="add_admin",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            )
+        )
 
 @admin_router.message(Command("removeadmin"))
 async def remove_admin_handler(message: types.Message, command: CommandObject, bot: Bot):
@@ -542,7 +612,14 @@ async def remove_admin_handler(message: types.Message, command: CommandObject, b
                 )
                 await bot.send_message(chat_id=target_user_id, text=notification)
             except Exception as e:
-                print(f"Ошибка при отправке уведомления удаляемому админу: {e}")
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="remove_admin.send_notification",
+                        user_id=target_user_id,
+                        severity=ErrorSeverity.LOW
+                    )
+                )
         else:
             await message.answer(result_message)
     
@@ -550,8 +627,14 @@ async def remove_admin_handler(message: types.Message, command: CommandObject, b
         await message.answer("❌ Неверный формат user_id. Должно быть число.")
     except Exception as e:
         await message.answer(f"❌ Ошибка при выполнении команды: {e}")
-        import traceback
-        traceback.print_exc()
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="remove_admin",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            )
+        )
 
 @admin_router.message(Command("admins"))
 async def list_admins_handler(message: types.Message):
@@ -607,8 +690,14 @@ async def list_admins_handler(message: types.Message):
     
     except Exception as e:
         await message.answer(f"❌ Ошибка при получении списка администраторов: {e}")
-        import traceback
-        traceback.print_exc()
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="list_admins",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            )
+        )
 
 @admin_router.message(Command("myadmin"))
 async def my_admin_info_handler(message: types.Message):
@@ -651,8 +740,14 @@ async def my_admin_info_handler(message: types.Message):
     
     except Exception as e:
         await message.answer(f"❌ Ошибка при получении информации: {e}")
-        import traceback
-        traceback.print_exc()
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="my_admin_info",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            )
+        )
 
 @admin_router.message(Command("setrole"))
 async def set_admin_role_handler(message: types.Message, command: CommandObject):
@@ -735,8 +830,14 @@ async def set_admin_role_handler(message: types.Message, command: CommandObject)
         await message.answer("❌ Неверный формат user_id. Должно быть число.")
     except Exception as e:
         await message.answer(f"❌ Ошибка при выполнении команды: {e}")
-        import traceback
-        traceback.print_exc()
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="set_admin_role",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            )
+        )
 # ============================================================================
 # АДМИН-ПАНЕЛЬ: Команда /admin
 # ============================================================================
@@ -768,8 +869,14 @@ async def admin_panel_handler(message: types.Message):
     
     except Exception as e:
         await message.answer(f"❌ Ошибка при открытии админ-панели: {e}")
-        import traceback
-        traceback.print_exc()
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="admin_panel",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            )
+        )
 
 
 # ============================================================================
@@ -849,10 +956,27 @@ async def admin_panel_callback_handler(callback: types.CallbackQuery, callback_d
                 f"📝 <b>Последние 5 действий:</b>\n"
             )
             
+            # Максимальная длина сообщения Telegram - 4096 символов
+            # Оставляем запас для заголовка и форматирования
+            MAX_MESSAGE_LENGTH = 4000
+            MAX_LOG_MESSAGE_LENGTH = 60  # Максимальная длина сообщения лога
+            
             for log in stats['recent_logs']:
                 log_time = log.created_at.strftime("%d.%m.%Y %H:%M")
-                log_msg = (log.message or 'без сообщения')[:50]
-                text += f"• {log_time} | {log.event_type} | {log_msg}\n"
+                log_message = log.message or 'без сообщения'
+                
+                # Обрезаем длинное сообщение лога
+                if len(log_message) > MAX_LOG_MESSAGE_LENGTH:
+                    log_message = log_message[:MAX_LOG_MESSAGE_LENGTH] + "..."
+                
+                log_line = f"• {log_time} | {log.event_type} | {log_message}\n"
+                
+                # Проверяем, не превышает ли общая длина сообщения лимит
+                if len(text) + len(log_line) > MAX_MESSAGE_LENGTH:
+                    text += "\n... (остальные логи обрезаны из-за ограничения длины сообщения)"
+                    break
+                
+                text += log_line
             
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_back_to_main_keyboard())
             await callback.answer()
@@ -1011,5 +1135,11 @@ async def admin_panel_callback_handler(callback: types.CallbackQuery, callback_d
     
     except Exception as e:
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
-        import traceback
-        traceback.print_exc()
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="admin_panel_callback",
+                user_id=callback.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            )
+        )

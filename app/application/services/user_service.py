@@ -1,12 +1,16 @@
 """
 User service: регистрация пользователей, варны, баны
 """
+import logging
 from app.infrastructure.db.session import get_async_session
 from app.infrastructure.db.repositories import UserRepository, WarnRepository, BanRepository, LogRepository
 from app.infrastructure.db.models import User, Warn, Ban, Log, UserStatus
 from typing import Optional
 from sqlalchemy import select, and_, update
 import datetime
+from app.common.error_handler import handle_error, ErrorContext, ErrorSeverity
+
+logger = logging.getLogger(__name__)
 
 async def register_user(user_id: int, username: str = None, full_name: str = None) -> User:
     """Регистрация нового пользователя или обновление информации существующего"""
@@ -194,11 +198,16 @@ async def unban_expired_users() -> int:
                 
                 unbanned_user_ids.add(ban.user_id)
                 unban_count += 1
-                print(f"✅ Автоматически снят бан с пользователя {ban.user_id}")
+                logger.info(f"✅ Автоматически снят бан с пользователя {ban.user_id}")
             except Exception as e:
-                print(f"⚠️ Ошибка при снятии бана с пользователя {ban.user_id}: {e}")
-                import traceback
-                traceback.print_exc()
+                await handle_error(
+                    error=e,
+                    context=ErrorContext(
+                        operation="unban_expired_users.unban_user",
+                        user_id=ban.user_id,
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                )
                 continue
         
         if unban_count > 0:

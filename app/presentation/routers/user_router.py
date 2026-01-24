@@ -1,14 +1,17 @@
 """
 Handlers for user (public) commands: /start, /help, /faq etc.
 """
+import logging
+import asyncio
 from aiogram import Router, types, Bot
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramNetworkError
 from app.application.services.user_service import register_user, get_user_by_id
 from app.application.services.admin_service import is_admin
 from app.config.settings import settings
-import asyncio
+from app.common.error_handler import handle_error, ErrorContext, ErrorSeverity
 
+logger = logging.getLogger(__name__)
 user_router = Router()
 
 @user_router.message(Command("start"))
@@ -48,10 +51,16 @@ async def start_handler(message: types.Message):
     except Exception as e:
         # Обработка ошибок
         error_message = f"❌ Произошла ошибка при регистрации. Попробуйте позже."
-        print(f"Ошибка в команде /start для пользователя {message.from_user.id}: {e}")
-        import traceback
-        traceback.print_exc()
-        await message.answer(error_message)
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="start_handler",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            ),
+            send_notification=lambda msg: message.answer(msg),
+            notification_message=error_message
+        )
 
 @user_router.message(Command("myid"))
 async def myid_handler(message: types.Message):
@@ -75,16 +84,22 @@ async def myid_handler(message: types.Message):
         
     except Exception as e:
         error_message = f"❌ Произошла ошибка. Попробуйте позже."
-        print(f"Ошибка в команде /myid для пользователя {message.from_user.id}: {e}")
-        import traceback
-        traceback.print_exc()
-        await message.answer(error_message)
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="myid_handler",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.MEDIUM
+            ),
+            send_notification=lambda msg: message.answer(msg),
+            notification_message=error_message
+        )
 
 @user_router.message(Command("help"))
 async def help_handler(message: types.Message, bot: Bot):
     """Команда /help - справка по командам бота"""
     try:
-        print(f"🔍 DEBUG: Обработчик /help вызван для пользователя {message.from_user.id}")
+        logger.debug(f"Обработчик /help вызван для пользователя {message.from_user.id}")
         # Проверяем, является ли пользователь администратором (из БД)
         is_admin_user = await is_admin(message.from_user.id)
         
@@ -131,12 +146,12 @@ async def help_handler(message: types.Message, bot: Bot):
         for attempt in range(max_attempts):
             try:
                 await message.answer(help_text, parse_mode="HTML")
-                print(f"✅ Сообщение /help успешно отправлено пользователю {message.from_user.id}")
+                logger.info(f"✅ Сообщение /help успешно отправлено пользователю {message.from_user.id}")
                 return
             except TelegramNetworkError as network_error:
                 if attempt < max_attempts - 1:
                     wait_time = (attempt + 1) * 2  # Увеличиваем время ожидания: 2, 4, 6 секунд
-                    print(f"⚠️ Сетевая ошибка при отправке /help (попытка {attempt + 1}/{max_attempts}): {network_error}. Повтор через {wait_time} сек...")
+                    logger.warning(f"⚠️ Сетевая ошибка при отправке /help (попытка {attempt + 1}/{max_attempts}): {network_error}. Повтор через {wait_time} сек...")
                     await asyncio.sleep(wait_time)
                 else:
                     # Последняя попытка - пробуем через bot.send_message
@@ -146,21 +161,24 @@ async def help_handler(message: types.Message, bot: Bot):
                             text=help_text,
                             parse_mode="HTML"
                         )
-                        print(f"✅ Сообщение /help отправлено через bot.send_message пользователю {message.from_user.id}")
+                        logger.info(f"✅ Сообщение /help отправлено через bot.send_message пользователю {message.from_user.id}")
                         return
                     except Exception as e:
-                        print(f"❌ Не удалось отправить /help через bot.send_message: {e}")
+                        logger.error(f"❌ Не удалось отправить /help через bot.send_message: {e}")
                         raise
             except Exception as e:
-                print(f"❌ Неожиданная ошибка при отправке /help: {e}")
+                logger.error(f"❌ Неожиданная ошибка при отправке /help: {e}")
                 raise
                 
     except Exception as e:
-        print(f"❌ Критическая ошибка в команде /help для пользователя {message.from_user.id}: {e}")
-        import traceback
-        traceback.print_exc()
-        # Пытаемся отправить простое сообщение об ошибке
-        try:
-            await message.answer("❌ Произошла ошибка при обработке команды. Попробуйте позже.")
-        except:
-            pass  # Если и это не работает, просто пропускаем
+        error_message = "❌ Произошла ошибка при обработке команды. Попробуйте позже."
+        await handle_error(
+            error=e,
+            context=ErrorContext(
+                operation="help_handler",
+                user_id=message.from_user.id,
+                severity=ErrorSeverity.HIGH
+            ),
+            send_notification=lambda msg: message.answer(msg),
+            notification_message=error_message
+        )
